@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=__LAUNCHER_NAME__
+Comment=GAME for AuroraOS
+Type=Application
+Categories=Game;
+X-Nemo-Application-Type=no-invoker
+Icon=__ORGNAME__.__APPNAME__
+Exec=__ORGNAME__.__APPNAME__
+
+[X-Application]
+Permissions=Internet;Audio
+OrganizationName=__ORGNAME__
+ApplicationName=__APPNAME__
+
+[X-Aurora-Application]
+Orientation=LandscapeInverted;Landscape
