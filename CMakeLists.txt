@@ -68,7 +68,17 @@ include_directories(
 find_package(PkgConfig REQUIRED)
 
 if(BUNDLE_SDL2)
-    # Встроенный SDL2 с фиксами под Аврору (savegame/SDL).
+    # Встроенный SDL2 с фиксами под Аврору (savegame/SDL, ветка auroraos-sdl2).
+    # Опции по рецепту AGENTS.MD: Wayland вместо X11, PulseAudio, shared.
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_AUDIO ON CACHE BOOL "" FORCE)
+    set(SDL_PULSEAUDIO ON CACHE BOOL "" FORCE)
+    set(SDL_RPATH OFF CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND ON CACHE BOOL "" FORCE)
+    set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
+    set(SDL_X11 OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(libsdl)
     set(SDL2_TARGET SDL2)
 else()

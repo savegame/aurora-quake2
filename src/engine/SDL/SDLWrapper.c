@@ -86,6 +86,12 @@ bool sdlwInitialize(SdlProcessEventFunction processEvent, Uint32 flags) {
     sdlw->windowWidth = 0;
     sdlw->windowHeight = 0;
 
+    #if defined(AURORA_OS)
+    // Aurora OS: PulseAudio needs the x-maemo media role, otherwise
+    // audio misbehaves on the platform. Must be set before SDL_Init().
+    SDL_setenv("PULSE_PROP_media.role", "x-maemo", 1);
+    #endif
+
     if (SDL_Init(flags) < 0) {
         printf("Unable to initialize SDL: %s\n", SDL_GetError());
         goto on_error;

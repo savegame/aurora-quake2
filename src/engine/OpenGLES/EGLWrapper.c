@@ -311,8 +311,20 @@ static EGLNativeWindowType eglwGetNativeWindow()
 
     #if defined(_WIN32)
     nativeWindow=wmInfo.info.win.window;
-    #elif defined(__unix__) && defined(SDL_VIDEO_DRIVER_X11)
-    nativeWindow=wmInfo.info.x11.window;
+    #elif defined(__unix__)
+    {
+        #if defined(SDL_VIDEO_DRIVER_WAYLAND)
+        if (wmInfo.subsystem == SDL_SYSWM_WAYLAND) {
+            // Wayland: SDL creates wl_egl_window for SDL_WINDOW_OPENGL windows.
+            nativeWindow = wmInfo.info.wl.egl_window;
+        }
+        #endif
+        #if defined(SDL_VIDEO_DRIVER_X11)
+        if (wmInfo.subsystem == SDL_SYSWM_X11) {
+            nativeWindow = wmInfo.info.x11.window;
+        }
+        #endif
+    }
     #endif
 
     #endif
@@ -340,7 +352,7 @@ bool eglwInitialize(EglwConfigInfo *minimalCfgi, EglwConfigInfo *requestedCfgi, 
     eglw->display = eglGetDisplaySDL();
     #else
 	EGLNativeDisplayType nativeDisplay = EGL_DEFAULT_DISPLAY;
-	#if defined(__unix__) && !defined(__RASPBERRY_PI__) && defined(SDL_VIDEO_DRIVER_X11)
+	#if defined(__unix__) && !defined(__RASPBERRY_PI__)
 	{
         struct SDL_SysWMinfo wmInfo;
         SDL_VERSION(&wmInfo.version);
@@ -348,8 +360,16 @@ bool eglwInitialize(EglwConfigInfo *minimalCfgi, EglwConfigInfo *requestedCfgi, 
             printf("Cannot get the window handle.\n");
             goto on_error;
         }
-        nativeDisplay = wmInfo.info.x11.display;
-        // nativeDisplay = XOpenDisplay(NULL);
+        #if defined(SDL_VIDEO_DRIVER_WAYLAND)
+        if (wmInfo.subsystem == SDL_SYSWM_WAYLAND) {
+            nativeDisplay = wmInfo.info.wl.display;
+        }
+        #endif
+        #if defined(SDL_VIDEO_DRIVER_X11)
+        if (wmInfo.subsystem == SDL_SYSWM_X11) {
+            nativeDisplay = wmInfo.info.x11.display;
+        }
+        #endif
 	}
 	#endif
     eglw->display = eglGetDisplay(nativeDisplay);

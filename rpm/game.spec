@@ -15,12 +15,17 @@ Source0:    %{name}.tar.gz
 
 BuildRequires: cmake
 BuildRequires: ninja
-BuildRequires: rsync
 BuildRequires: patchelf
-BuildRequires: pkgconfig(sdl2)
+BuildRequires: pkgconfig(wayland-client)
+BuildRequires: pkgconfig(wayland-cursor)
+BuildRequires: pkgconfig(wayland-egl)
+BuildRequires: pkgconfig(wayland-protocols)
+BuildRequires: pkgconfig(wayland-scanner)
 BuildRequires: pkgconfig(glesv2)
+BuildRequires: pkgconfig(xkbcommon)
+BuildRequires: pkgconfig(vulkan)
 BuildRequires: pkgconfig(egl)
-BuildRequires: pkgconfig(zlib)
+BuildRequires: pkgconfig(libpulse)
 
 %description
 Quake 2 ported to Aurora OS using SDL2 and OpenGL ES 2 backend.
@@ -39,6 +44,7 @@ cmake \
     -DCMAKE_SYSTEM_PROCESSOR=%{_arch} \
     -DAURORA_ORG=%{_app_orgname} \
     -DAURORA_APP=%{_app_appname} \
+    -DBUNDLE_SDL2=ON \
     -S . \
     -B build/%{_arch}/rpm
 
@@ -47,6 +53,10 @@ cmake --build build/%{_arch}/rpm
 %install
 install -m 0755 -D build/%{_arch}/rpm/quake2 %{buildroot}%{_bindir}/%{name}
 patchelf --force-rpath --set-rpath %{_datadir}/%{name}/lib %{buildroot}%{_bindir}/%{name}
+
+# Bundled SDL2 (Aurora fixes, savegame/SDL)
+install -d %{buildroot}%{_datadir}/%{name}/lib
+install -D -s build/%{_arch}/rpm/libsdl/libSDL2-2.0.so* -t %{buildroot}%{_datadir}/%{name}/lib
 
 # Mission packs (game.so)
 install -m 0755 -D build/%{_arch}/rpm/baseq2/game.so   %{buildroot}%{_datadir}/%{name}/baseq2/game.so

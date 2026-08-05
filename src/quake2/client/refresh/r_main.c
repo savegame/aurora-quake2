@@ -3832,6 +3832,11 @@ static bool R_Window_update(bool forceFlag)
             #else
             int flags = SDL_WINDOW_RESIZABLE;
             #endif
+            #if defined(AURORA_OS)
+            // On Wayland SDL creates the wl_egl_window (needed by EGLWrapper)
+            // only for windows with the SDL_WINDOW_OPENGL flag.
+            flags |= SDL_WINDOW_OPENGL;
+            #endif
 			#if !defined(__RASPBERRY_PI__)
             if (fullscreen)
 				flags |= SDL_WINDOW_FULLSCREEN;
