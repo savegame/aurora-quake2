@@ -81,6 +81,9 @@ if(BUNDLE_SDL2)
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(libsdl)
     set(SDL2_TARGET SDL2)
+    # EGL под Wayland: нативные типы wl_display/wl_egl_window вместо X11
+    # (в таргете Авроры eglplatform.h иначе тянет X11/Xlib.h, которого нет).
+    add_compile_definitions(WL_EGL_PLATFORM)
 else()
     pkg_check_modules(SDL2 sdl2 REQUIRED IMPORTED_TARGET)
     set(SDL2_TARGET PkgConfig::SDL2)
