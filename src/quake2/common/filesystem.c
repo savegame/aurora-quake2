@@ -1008,6 +1008,15 @@ static void FS_AddGameDirectories(const char * dir)
 	FS_AddGameDirectory(va("%s/%s", fs_basedir->string, dir));
 	FS_AddBinaryDirAsGameDirectory(dir);
 	FS_AddHomeAsGameDirectory(dir);
+	#if defined(AURORA_OS)
+	{
+		// On Aurora the game data (e.g. Steam version) can be put into
+		// ~/Downloads/Games/Quake2 by the user.
+		const char *homeEnv = getenv("HOME");
+		if (homeEnv != NULL && homeEnv[0] != '\0')
+			FS_AddGameDirectory(va("%s/%s/%s", homeEnv, "Downloads/Games/Quake2", dir));
+	}
+	#endif
 	#if defined(__GCW_ZERO__)
 	FS_AddGameDirectory(va("%s/%s", "/media/data/Quake2", dir)); // Internal SD card.
 //	FS_AddGameDirectory(va("%s/%s", "../../Quake2", dir)); // External SD card when using an OPK from the /apps directory.
