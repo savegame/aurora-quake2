@@ -1,4 +1,4 @@
-%define _app_orgname org.example
+%define _app_orgname ru.sashikknox
 %define _app_appname quake2
 %define _app_launcher_name Quake 2
 
