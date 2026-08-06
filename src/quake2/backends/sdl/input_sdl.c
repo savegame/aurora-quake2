@@ -2,6 +2,9 @@
 #include "client/client.h"
 #include "client/keyboard.h"
 #include "client/refresh/r_private.h"
+#if defined(AURORA_FBO)
+#include "client/refresh/r_fbo.h"
+#endif
 
 #if defined(AURORA_OS)
 #include "client/cl_touch.h"
@@ -390,8 +393,19 @@ bool IN_processEvent(SDL_Event *event)
 	case SDL_FINGERDOWN:
 	case SDL_FINGERMOTION:
 	case SDL_FINGERUP:
+#if defined(AURORA_FBO)
+		{
+			/* Тач приходит в координатах окна, контент в буфере повёрнут —
+			   переводим в координаты FBO (для них же посчитана раскладка
+			   тач-кнопок по viddef). */
+			int tx, ty;
+			RFBO_TransformTouch(event->tfinger.x, event->tfinger.y, &tx, &ty);
+			Touch_FingerEvent(event->type, (long long)event->tfinger.fingerId, tx, ty);
+		}
+#else
 		Touch_FingerEvent(event->type, (long long)event->tfinger.fingerId,
 			event->tfinger.x * viddef.width, event->tfinger.y * viddef.height);
+#endif
 		break;
 #endif
 

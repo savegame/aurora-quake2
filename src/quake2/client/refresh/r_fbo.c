@@ -343,6 +343,26 @@ int RFBO_GetRotation(void)
 	return l_fbo.rotation;
 }
 
+void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
+{
+	/* Палец приходит в координатах окна (композитор Wayland уже учёл
+	   buffer transform при доставке ввода). В буфере окна контент повёрнут
+	   матрицей квада из вершинного шейдера — для хит-теста применяем
+	   обратный поворот: window NDC -> content NDC -> пиксели FBO. */
+	float nx = fx * 2.0f - 1.0f;
+	float ny = 1.0f - fy * 2.0f;
+	float cx, cy;
+	switch (l_fbo.rotation & 3)
+	{
+	case 1:  cx = ny;  cy = -nx; break; /* обратный к (x,y) -> (-y,x) */
+	case 2:  cx = -nx; cy = -ny; break;
+	case 3:  cx = -ny; cy = nx;  break; /* обратный к (x,y) -> (y,-x) */
+	default: cx = nx;  cy = ny;  break;
+	}
+	*x = (int)((cx + 1.0f) * 0.5f * l_fbo.fboW);
+	*y = (int)((1.0f - cy) * 0.5f * l_fbo.fboH);
+}
+
 #else /* !AURORA_FBO — заглушки, сборка без дефайна = движок как раньше. */
 
 bool RFBO_Init(int windowWidth, int windowHeight) { (void)windowWidth; (void)windowHeight; return false; }
@@ -355,5 +375,9 @@ void RFBO_SetScale(float scale) { (void)scale; }
 float RFBO_GetScale(void) { return 1.0f; }
 void RFBO_SetRotation(int wlOutputTransform) { (void)wlOutputTransform; }
 int RFBO_GetRotation(void) { return 0; }
+void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
+{
+	(void)fx; (void)fy; (void)x; (void)y;
+}
 
 #endif

@@ -42,4 +42,8 @@ float RFBO_GetScale(void);
 void RFBO_SetRotation(int wlOutputTransform);
 int RFBO_GetRotation(void);
 
+/* Тач из координат окна (нормированные 0..1, как в SDL_TouchFingerEvent)
+   в координаты контента (пиксели FBO) с учётом поворота квада (этап 4). */
+void RFBO_TransformTouch(float fx, float fy, int *x, int *y);
+
 #endif
