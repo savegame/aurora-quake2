@@ -30,6 +30,8 @@
 bool oglwCreate();
 void oglwDestroy();
 bool oglwIsCreated();
+// Программа wrapper'а (нужна FBO-модулю Авроры, чтобы вернуть её после блита квада).
+GLuint oglwGetProgram();
 
 //--------------------------------------------------------------------------------
 // Viewport.

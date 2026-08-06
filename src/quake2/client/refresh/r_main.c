@@ -1,6 +1,7 @@
 #include "client/client.h"
 #include "client/keyboard.h"
 #include "client/refresh/r_private.h"
+#include "client/refresh/r_fbo.h"
 
 glconfig_t gl_config;
 glstate_t gl_state;
@@ -3405,6 +3406,11 @@ static void R_Frame_clear(int eyeIndex)
 
 void R_Frame_begin(float camera_separation, int eyeIndex)
 {
+#if defined(AURORA_FBO)
+	// Рендер кадра идёт в FBO (для движка это «экран»: viddef = размер FBO).
+	RFBO_BindForFrame();
+#endif
+
 	gl_state.camera_separation = camera_separation;
     gl_state.eyeIndex = eyeIndex;
 
@@ -3462,6 +3468,11 @@ void R_Frame_end()
 		gl_config.discardFramebuffer(GL_FRAMEBUFFER_OES, 2, attachements);
         #endif
 	}
+#if defined(AURORA_FBO)
+	// Вывод текстуры FBO квадом на экран (пока ещё bound FBO,
+	// discard выше корректно относится к его depth/stencil).
+	RFBO_DrawToScreen();
+#endif
 	eglwSwapBuffers();
 	Gles_checkGlesError();
 	Gles_checkEglError();
@@ -4044,6 +4055,12 @@ static bool R_Window_createContext()
 	if (oglwCreate())
 		goto on_error;
 
+#if defined(AURORA_FBO)
+	// FBO-модуль Авроры (контекст current, viddef = размер окна).
+	// При неудаче модуль отключается, игра рендерит напрямую на экран.
+	RFBO_Init(viddef.width, viddef.height);
+#endif
+
 	R_Gamma_initialize();
 
 	SDL_ShowCursor(0);
@@ -4326,6 +4343,10 @@ void R_finalize()
 	Mod_FreeAll();
 
 	R_ShutdownImages();
+
+#if defined(AURORA_FBO)
+	RFBO_Shutdown();
+#endif
 
 	R_Window_finalize();
 	if (SDL_WasInit(SDL_INIT_VIDEO))

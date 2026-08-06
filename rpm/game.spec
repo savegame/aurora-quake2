@@ -44,6 +44,7 @@ cmake \
     -DCMAKE_SYSTEM_PROCESSOR=%{_arch} \
     -DAURORA_ORG=%{_app_orgname} \
     -DAURORA_APP=%{_app_appname} \
+    -DAURORA_FBO=ON \
     -DBUNDLE_SDL2=ON \
     -S . \
     -B build/%{_arch}/rpm

@@ -564,6 +564,11 @@ bool oglwIsCreated() {
     return oglw != NULL;
 }
 
+GLuint oglwGetProgram() {
+    OpenGLWrapper *oglw = l_openGLWrapper;
+    return oglw ? oglw->program : 0;
+}
+
 //--------------------------------------------------------------------------------
 // Viewport.
 //--------------------------------------------------------------------------------
