@@ -320,6 +320,13 @@ bool IN_processEvent(SDL_Event *event)
 		}
 		break;
 
+#if defined(AURORA_FBO)
+	case SDL_DISPLAYEVENT:
+		if (event->display.event == SDL_DISPLAYEVENT_ORIENTATION)
+			R_AuroraUpdateTransform();
+		break;
+#endif
+
 	case SDL_MOUSEWHEEL:
 		Key_Event((event->wheel.y > 0 ? K_MWHEELUP : K_MWHEELDOWN), true);
 		Key_Event((event->wheel.y > 0 ? K_MWHEELUP : K_MWHEELDOWN), false);

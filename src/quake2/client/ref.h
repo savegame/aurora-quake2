@@ -164,6 +164,12 @@ void R_initialize();
 void R_checkChanges();
 void R_Window_toggleFullScreen();
 
+#if defined(AURORA_FBO)
+// Пересчитать поворот контента (ориентация дисплея/смена панели) —
+// поворот квада FBO + wl_surface_set_buffer_transform. Этап 3 порта на Аврору.
+void R_AuroraUpdateTransform();
+#endif
+
 void R_printf(int print_level, char *fmt, ...);
 void R_error(int err_level, char *fmt, ...);
 

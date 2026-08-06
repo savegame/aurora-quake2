@@ -23,6 +23,7 @@
 
 #if defined(AURORA_FBO)
 
+
 /* Attribute locations, гарантированно не пересекающиеся с wrapper'ом
    (a_position/a_color/a_texcoord0/a_texcoord1 — низкие индексы). */
 #define RFBO_ATTR_POS 14
@@ -185,11 +186,27 @@ static void RFBO_DestroyTargets(void)
 	l_fbo.depthStencilRb = 0;
 }
 
+/* Размер FBO из размера окна: при повороте на 90/270 размеры перевёрнуты
+   (ландшафтный контент на портретной панели), масштаб — коэффициентом.
+   Размер буфера НЕ зависит от смены ориентации 90↔270 (оба — перевёрнутые),
+   поэтому при повороте устройства FBO не пересоздаётся. */
+static void RFBO_ComputeSize(int windowWidth, int windowHeight, int *fboW, int *fboH)
+{
+	bool swapped = (l_fbo.rotation == 1 || l_fbo.rotation == 3);
+	int w = swapped ? windowHeight : windowWidth;
+	int h = swapped ? windowWidth : windowHeight;
+	*fboW = (int)(w * l_fbo.scale + 0.5f);
+	*fboH = (int)(h * l_fbo.scale + 0.5f);
+}
+
 bool RFBO_Init(int windowWidth, int windowHeight)
 {
+	/* rotation выставляется вызывающим кодом ДО Init (от него зависят
+	   размеры FBO) — сохраняем его. */
+	int rotation = l_fbo.rotation;
 	memset(&l_fbo, 0, sizeof(l_fbo));
 	l_fbo.scale = 1.0f;
-	l_fbo.rotation = 0; /* WL_OUTPUT_TRANSFORM_NORMAL */
+	l_fbo.rotation = rotation;
 
 	l_fbo.program = RFBO_CreateProgram();
 	if (l_fbo.program == 0)
@@ -199,8 +216,7 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 
 	l_fbo.screenW = windowWidth;
 	l_fbo.screenH = windowHeight;
-	l_fbo.fboW = windowWidth;
-	l_fbo.fboH = windowHeight;
+	RFBO_ComputeSize(windowWidth, windowHeight, &l_fbo.fboW, &l_fbo.fboH);
 
 	if (!RFBO_CreateTargets(l_fbo.fboW, l_fbo.fboH))
 	{
@@ -235,8 +251,7 @@ void RFBO_Resize(int windowWidth, int windowHeight)
 
 	l_fbo.screenW = windowWidth;
 	l_fbo.screenH = windowHeight;
-	l_fbo.fboW = (int)(windowWidth * l_fbo.scale + 0.5f);
-	l_fbo.fboH = (int)(windowHeight * l_fbo.scale + 0.5f);
+	RFBO_ComputeSize(windowWidth, windowHeight, &l_fbo.fboW, &l_fbo.fboH);
 
 	RFBO_DestroyTargets();
 	if (!RFBO_CreateTargets(l_fbo.fboW, l_fbo.fboH))

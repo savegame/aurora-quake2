@@ -3,6 +3,11 @@
 #include "client/refresh/r_private.h"
 #include "client/refresh/r_fbo.h"
 
+#if defined(AURORA_FBO)
+#include <SDL2/SDL_syswm.h>
+#include <wayland-client.h>
+#endif
+
 glconfig_t gl_config;
 glstate_t gl_state;
 bool r_stencilAvailable = false;
@@ -3404,6 +3409,60 @@ static void R_Frame_clear(int eyeIndex)
 	}
 }
 
+#if defined(AURORA_FBO)
+// Поворот контента (этап 3): игра ландшафтная. Одно и то же значение
+// wl_output_transform идёт в поворот квада (RFBO_SetRotation) и в
+// wl_surface_set_buffer_transform. Маппинг — по таблице «Маппинг
+// ориентаций под ориентацию игры» из gameport/AGENTS.MD.
+static struct wl_surface *l_auroraWlSurface = NULL;
+
+static int R_AuroraComputeTransform(void)
+{
+	SdlwContext *sdlw = sdlwContext;
+	int displayIndex = SDL_GetWindowDisplayIndex(sdlw->window);
+	if (displayIndex < 0)
+		displayIndex = 0;
+
+	// Тип панели — по нативной развёртке текущего дисплея (SDL кэширует
+	// mode от композитора, частые запросы ничего не стоят).
+	bool portraitPanel = true;
+	SDL_DisplayMode mode;
+	if (SDL_GetCurrentDisplayMode(displayIndex, &mode) == 0)
+		portraitPanel = mode.h > mode.w;
+
+	switch (SDL_GetDisplayOrientation(displayIndex))
+	{
+	case SDL_ORIENTATION_LANDSCAPE:
+		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+	case SDL_ORIENTATION_LANDSCAPE_FLIPPED:
+		return portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+	case SDL_ORIENTATION_PORTRAIT:
+		return portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+	case SDL_ORIENTATION_PORTRAIT_FLIPPED:
+		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+	default:
+		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+	}
+}
+
+void R_AuroraUpdateTransform(void)
+{
+	int transform = R_AuroraComputeTransform();
+	RFBO_SetRotation(transform);
+
+	if (l_auroraWlSurface == NULL)
+	{
+		SdlwContext *sdlw = sdlwContext;
+		SDL_SysWMinfo wmInfo;
+		SDL_VERSION(&wmInfo.version);
+		if (SDL_GetWindowWMInfo(sdlw->window, &wmInfo) && wmInfo.subsystem == SDL_SYSWM_WAYLAND)
+			l_auroraWlSurface = wmInfo.info.wl.surface;
+	}
+	if (l_auroraWlSurface != NULL)
+		wl_surface_set_buffer_transform(l_auroraWlSurface, transform);
+}
+#endif
+
 void R_Frame_begin(float camera_separation, int eyeIndex)
 {
 #if defined(AURORA_FBO)
@@ -3461,10 +3520,18 @@ void R_Frame_end()
 {
 	if (r_discardframebuffer->value && gl_config.discardFramebuffer)
 	{
+        #if defined(AURORA_FBO)
+		// На этом месте bound наш FBO: EXT_discard_framebuffer требует
+		// для не-дефолтного FBO токены GL_*_ATTACHMENT (GL_DEPTH_EXT/
+		// GL_STENCIL_EXT валидны только для default framebuffer — иначе
+		// GL_INVALID_ENUM).
+		static const GLenum attachements[] = { GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
+		gl_config.discardFramebuffer(GL_FRAMEBUFFER, 2, attachements);
+        #elif defined(EGLW_GLES2)
 		static const GLenum attachements[] = { GL_DEPTH_EXT, GL_STENCIL_EXT };
-        #if defined(EGLW_GLES2)
 		gl_config.discardFramebuffer(GL_FRAMEBUFFER, 2, attachements);
         #else
+		static const GLenum attachements[] = { GL_DEPTH_EXT, GL_STENCIL_EXT };
 		gl_config.discardFramebuffer(GL_FRAMEBUFFER_OES, 2, attachements);
         #endif
 	}
@@ -4009,9 +4076,18 @@ static bool R_Window_update(bool forceFlag)
     
 	int effectiveWidth, effectiveHeight;
 	SDL_GetWindowSize(sdlw->window, &effectiveWidth, &effectiveHeight);
+	sdlwResize(effectiveWidth, effectiveHeight);
+#if defined(AURORA_FBO)
+	// Подмена размеров экрана размерами FBO: движок рендерит в FBO,
+	// для него "экран" — это буфер FBO. RFBO_Resize сам решит, нужно ли
+	// пересоздание; до RFBO_Init размер FBO = 0 — берём размер окна.
+	RFBO_Resize(effectiveWidth, effectiveHeight);
+	RFBO_GetSize(&effectiveWidth, &effectiveHeight);
+	if (effectiveWidth <= 0 || effectiveHeight <= 0)
+		SDL_GetWindowSize(sdlw->window, &effectiveWidth, &effectiveHeight);
+#endif
 	viddef.width = effectiveWidth;
 	viddef.height = effectiveHeight;
-	sdlwResize(effectiveWidth, effectiveHeight);
     return false;
 }
 
@@ -4056,6 +4132,8 @@ static bool R_Window_createContext()
 		goto on_error;
 
 #if defined(AURORA_FBO)
+	// Поворот контента до создания FBO: от transform зависят его размеры.
+	R_AuroraUpdateTransform();
 	// FBO-модуль Авроры (контекст current, viddef = размер окна).
 	// При неудаче модуль отключается, игра рендерит напрямую на экран.
 	RFBO_Init(viddef.width, viddef.height);

@@ -91,6 +91,7 @@ endif()
 
 pkg_check_modules(GLESV2 glesv2 REQUIRED)
 pkg_check_modules(EGL egl REQUIRED)
+pkg_check_modules(WAYLAND_CLIENT wayland-client REQUIRED)
 
 # Собираем zlib статикой из исходников (оригинальный CMakeLists zlib
 # в upstream-репозитории lp-public неполный, поэтому делаем минимальный target).
@@ -147,12 +148,14 @@ target_include_directories(quake2 PRIVATE
     ${SDL2_INCLUDE_DIRS}
     ${GLESV2_INCLUDE_DIRS}
     ${EGL_INCLUDE_DIRS}
+    ${WAYLAND_CLIENT_INCLUDE_DIRS}
 )
 
 target_link_libraries(quake2
     ${SDL2_TARGET}
     ${GLESV2_LIBRARIES}
     ${EGL_LIBRARIES}
+    ${WAYLAND_CLIENT_LIBRARIES}
     zlib_quake2
     m
     dl
