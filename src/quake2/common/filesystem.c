@@ -1544,7 +1544,13 @@ void FS_InitFilesystem()
 	Cmd_AddCommand("dir", FS_Dir_f);
 
 	/* basedir <path> Allows the game to run from outside the data tree.  */
+#if defined(AURORA_OS)
+	// On Aurora the game data installed by the package lives in the
+	// application data dir, use it as the default basedir.
+	fs_basedir = Cvar_Get("basedir", "/usr/share/" AURORA_ORG "." AURORA_APP, CVAR_NOSET);
+#else
 	fs_basedir = Cvar_Get("basedir", ".", CVAR_NOSET);
+#endif
 
 	/* cddir <path> Logically concatenates the cddir after the basedir to
 	   allow the game to run from outside the data tree. */

@@ -195,7 +195,7 @@ void* Sys_LoadLibrary(const char *path, const char *sym, void **handle)
 	void *module = SDL_LoadObject(path);
 	if (!module)
 	{
-		//Com_Printf("%s failed: SDL_LoadObject returned NULL on %s\n", __func__, path);
+		Com_Printf("%s failed: %s on %s\n", __func__, SDL_GetError(), path);
 		return NULL;
 	}
 

@@ -3,6 +3,10 @@
 #include "client/keyboard.h"
 #include "client/refresh/r_private.h"
 
+#if defined(AURORA_OS)
+#include "client/cl_touch.h"
+#endif
+
 #include "SDL/SDLWrapper.h"
 
 #include <SDL2/SDL.h>
@@ -375,6 +379,15 @@ bool IN_processEvent(SDL_Event *event)
 	}
 	break;
 
+#if defined(AURORA_OS)
+	case SDL_FINGERDOWN:
+	case SDL_FINGERMOTION:
+	case SDL_FINGERUP:
+		Touch_FingerEvent(event->type, (long long)event->tfinger.fingerId,
+			event->tfinger.x * viddef.width, event->tfinger.y * viddef.height);
+		break;
+#endif
+
 	case SDL_JOYAXISMOTION:
 		break;
 	case SDL_JOYBUTTONDOWN:
@@ -440,6 +453,10 @@ bool IN_processEvent(SDL_Event *event)
 void IN_Update()
 {
 	sdlwCheckEvents();
+
+#if defined(AURORA_OS)
+	Touch_Frame();
+#endif
 
 	// Grab and ungrab the mouse if the  console or the menu is opened.
 	bool want_grab = (r_fullscreen->value || input_grab->value == 1 || (input_grab->value == 2 && mouse_windowed->value));
@@ -626,6 +643,12 @@ void IN_Init()
 	stick_deadzone = Cvar_Get("stick_deadzone", "0.2", CVAR_ARCHIVE);
 
 	r_fullscreen = Cvar_Get("r_fullscreen", GL_FULLSCREEN_DEFAULT_STRING, CVAR_ARCHIVE);
+
+#if defined(AURORA_OS)
+	// Не даём SDL синтезировать события мыши из тача — тач обрабатываем сами.
+	SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+	Touch_Init();
+#endif
 
 	SDL_StartTextInput();
 

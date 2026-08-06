@@ -80,8 +80,6 @@ install -m 644 -D icons/172.png %{buildroot}%{_datadir}/icons/hicolor/172x172/ap
 sed "s/__ORGNAME__/%{_app_orgname}/g" game.desktop.in > %{name}.desktop
 sed -i "s/__APPNAME__/%{_app_appname}/g" %{name}.desktop
 sed -i "s/__LAUNCHER_NAME__/%{_app_launcher_name}/g" %{name}.desktop
-# Point the engine at the packaged data directory
-sed -i "s|^Exec=.*|Exec=%{name} -basedir %{_datadir}/%{name}|" %{name}.desktop
 
 install -m 644 -D %{name}.desktop %{buildroot}%{_datadir}/applications/%{name}.desktop
 

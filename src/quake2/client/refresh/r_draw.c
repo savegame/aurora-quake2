@@ -243,6 +243,21 @@ void Draw_FadeScreen()
 	oglwEnableTexturing(0, GL_TRUE);
 }
 
+/*
+ * Fills a box of pixels with a single RGBA color (with real alpha,
+ * unlike Draw_Fill). Used by the Aurora touch overlay.
+ */
+void Draw_FillAlpha(int x, int y, int w, int h, float r, float g, float b, float a)
+{
+	oglwEnableTexturing(0, GL_FALSE);
+	oglwBegin(GL_QUADS);
+	OglwVertex *v = oglwAllocateVertex(4);
+	if (v)
+		AddQuad2D_C(v, x, y, x + w, y + h, r, g, b, a);
+	oglwEnd();
+	oglwEnableTexturing(0, GL_TRUE);
+}
+
 void Draw_StretchRaw(int x, int y, int w, int h, int cols, int rows, byte *data)
 {
 	unsigned image32[256 * 256];

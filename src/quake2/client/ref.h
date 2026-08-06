@@ -42,6 +42,11 @@
 #define GL_FULLSCREEN_DEFAULT 1
 #define GL_FULLSCREEN_DEFAULT_STRING "1"
 #define GL_WINDOWED_MOUSE_DEFAULT_STRING "0"
+#elif defined(AURORA_OS)
+// На телефоне под Авророй оконный режим не имеет смысла: всегда полный экран.
+#define GL_FULLSCREEN_DEFAULT 1
+#define GL_FULLSCREEN_DEFAULT_STRING "1"
+#define GL_WINDOWED_MOUSE_DEFAULT_STRING "0"
 #else
 #define GL_FULLSCREEN_DEFAULT 0
 #define GL_FULLSCREEN_DEFAULT_STRING "0"
@@ -189,6 +194,7 @@ void Draw_CharScaled(int x, int y, int num, float scale);
 
 void Draw_TileClear(int x, int y, int w, int h, char *name);
 void Draw_Fill(int x, int y, int w, int h, int c);
+void Draw_FillAlpha(int x, int y, int w, int h, float r, float g, float b, float a);
 void Draw_FadeScreen();
 void Draw_StretchRaw(int x, int y, int w, int h, int cols, int rows, byte *data);
 

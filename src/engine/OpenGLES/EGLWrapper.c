@@ -436,6 +436,11 @@ void eglwFinalize() {
 	EglwContext *eglw = eglwContext;
 	if (eglw != NULL)
 	{
+		#if defined(AURORA_OS)
+		// eglplatform_wayland.so из libhybris падает в eglMakeCurrent/eglTerminate
+		// при шатдауне. Процесс всё равно завершается, поэтому под Авророй
+		// разрушение EGL не выполняем, а просто освобождаем контекст.
+		#else
 		eglMakeCurrent(eglw->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 		eglDestroySurface(eglw->display, eglw->surface);
 
@@ -451,6 +456,7 @@ void eglwFinalize() {
 
 		eglDestroyContext(eglw->display, eglw->context);
 		eglTerminate(eglw->display);
+		#endif
 		free(eglw);
 		eglwContext = NULL;
 	}

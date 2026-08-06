@@ -3697,12 +3697,12 @@ static bool R_Window_getNearestDisplayMode(SDL_DisplayMode *nearestMode)
             break;
         }
         R_printf(PRINT_ALL, "Mode %i %ix%i %i bpp (%s) %i Hz\n", i, mode.w, mode.h, SDL_BITSPERPIXEL(mode.format), SDL_GetPixelFormatName(mode.format), mode.refresh_rate);
-        bool nearer =
+        bool nearer = (bestModeIndex < 0) || (
             abs(requestedWidth - mode.w) <= abs(requestedWidth - bestMode.w) && abs(requestedHeight - mode.h) <= abs(requestedHeight - bestMode.h) &&
             abs(requestedBpp - (int)SDL_BITSPERPIXEL(mode.format)) <= abs(requestedBpp - (int)SDL_BITSPERPIXEL(bestMode.format)) &&
             abs(requestedFrequency - mode.refresh_rate) <= abs(requestedFrequency - bestMode.refresh_rate)
-            ;
-        bool bestAbove = bestMode.w >= requestedWidth && bestMode.h >= requestedHeight && (int)SDL_BITSPERPIXEL(bestMode.format) >= requestedBpp && bestMode.refresh_rate >= requestedFrequency;
+            );
+        bool bestAbove = bestModeIndex >= 0 && bestMode.w >= requestedWidth && bestMode.h >= requestedHeight && (int)SDL_BITSPERPIXEL(bestMode.format) >= requestedBpp && bestMode.refresh_rate >= requestedFrequency;
         bool above = mode.w >= requestedWidth && mode.h >= requestedHeight && (int)SDL_BITSPERPIXEL(mode.format) >= requestedBpp && mode.refresh_rate >= requestedFrequency;
         if ((above && !bestAbove) || nearer)
         {
@@ -3754,6 +3754,19 @@ static void R_Window_getValidWindowSize(int maxWindowWidth, int maxWindowHeight,
 	(void)requestedHeight;
     *windowWidth = 320;
     *windowHeight = 240;
+	#elif defined(AURORA_OS)
+	// На Авроре окно всегда полноэкранное: размер окна = размеру дисплея
+	// (до этапа FBO размер буфера совпадает с размером экрана).
+	if (maxWindowWidth > 0 && maxWindowHeight > 0)
+	{
+		*windowWidth = maxWindowWidth;
+		*windowHeight = maxWindowHeight;
+	}
+	else
+	{
+		*windowWidth = requestedWidth;
+		*windowHeight = requestedHeight;
+	}
 	#else
     if (maxWindowWidth > 0 && requestedWidth > maxWindowWidth)
         requestedWidth = maxWindowWidth;
@@ -3771,7 +3784,11 @@ static void R_Window_getValidWindowSize(int maxWindowWidth, int maxWindowHeight,
 static bool R_Window_setup()
 {
 	SdlwContext *sdlw = sdlwContext;
+    #if defined(AURORA_OS)
+    bool fullscreen = true;
+    #else
     bool fullscreen = r_fullscreen->value;
+    #endif
     if (fullscreen)
     {
         SDL_DisplayMode displayMode;
@@ -3815,7 +3832,8 @@ static bool R_Window_update(bool forceFlag)
 
         bool updateNeeded = false;
 
-        #if defined(R_WINDOWED_MODE_DISABLED)
+        #if defined(R_WINDOWED_MODE_DISABLED) || defined(AURORA_OS)
+		// На Авроре (телефон) оконного режима нет — всегда полный экран.
         bool fullscreen = true;
         #else
         bool fullscreen = r_fullscreen->value;

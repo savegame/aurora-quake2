@@ -27,6 +27,10 @@
 
 #include "client/client.h"
 
+#if defined(AURORA_OS)
+#include "client/cl_touch.h"
+#endif
+
 float scr_con_current; /* aproaches scr_conlines at scr_conspeed */
 float scr_conlines; /* 0.0 to 1.0f lines of console to display */
 
@@ -1281,6 +1285,10 @@ void SCR_UpdateScreen()
 				}
 
 				M_Draw();
+#if defined(AURORA_OS)
+				if (i == numframes - 1)
+					Touch_DrawOverlay();
+#endif
 			}
 			else
 			if (cls.key_dest == key_console)
@@ -1344,6 +1352,11 @@ void SCR_UpdateScreen()
 			SCR_DrawConsole();
 
 			M_Draw();
+
+#if defined(AURORA_OS)
+			if (i == numframes - 1)
+				Touch_DrawOverlay();
+#endif
 
 			SCR_DrawLoading();
 		}
