@@ -5,7 +5,7 @@
 # После этапа 0 прежняя premake-сборка заменяется этим CMakeLists.txt.
 
 cmake_minimum_required(VERSION 3.16)
-project(Quake2Aurora C)
+project(Quake2Aurora C CXX)
 
 option(AURORA_FBO "Включить FBO-модуль для поворота/ресайза (этап 2)" OFF)
 option(BUNDLE_SDL2 "Собирать встроенный SDL2 из libsdl (Aurora-фикс)" OFF)
@@ -119,6 +119,29 @@ target_include_directories(zlib_quake2 PUBLIC
     ${CMAKE_CURRENT_BINARY_DIR}/zlib_config
 )
 
+# --- Dear ImGui (UI-оверлей: тач-UI, далее лаунчер/клавиатура) --------------
+# Своя копия в репо (imgui/, v1.89.5 из gameport/examples), GLES2-бэкенд.
+add_library(imgui STATIC
+    imgui/imgui.cpp
+    imgui/imgui_draw.cpp
+    imgui/imgui_tables.cpp
+    imgui/imgui_widgets.cpp
+    imgui/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui PUBLIC
+    imgui
+    ${GLESV2_INCLUDE_DIRS}
+)
+# ES3, а не ES2: бэкенд с ES2-дефайном не изолирует vertex attrib state
+# (атрибуты 0-2 перетирают низкие attribute locations OpenGLWrapper'а —
+# после первого кадра imgui рендер игры рассыпается). ES3-путь использует
+# VAO (GPU — ES 3.2), что даёт полную изоляцию attrib-состояния.
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
+# AURORA: фиксированный GL-id текстуры атласа шрифтов imgui, вне
+# диапазона самоназначаемых id текстур движка Quake2 (1024..~3220) —
+# см. комментарий в imgui_impl_opengl3.cpp (CreateFontsTexture).
+target_compile_definitions(imgui PRIVATE AURORA_IMGUI_FONT_TEX_ID=65000)
+
 # --- Исполняемый Quake2 ----------------------------------------------------
 
 file(GLOB_RECURSE QUAKE2_SOURCES
@@ -142,7 +165,13 @@ file(GLOB_RECURSE QUAKE2_SOURCES
 # Исключаем Windows-бэкенды, если glob их захватил через symlink/копию.
 list(FILTER QUAKE2_SOURCES EXCLUDE REGEX "src/quake2/backends/windows/.*")
 
+# C++-шим над imgui (glob выше собирает только *.c).
+list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_imgui.cpp)
+
 add_executable(quake2 ${QUAKE2_SOURCES})
+
+# В проекте есть C++ (imgui) — линкуем C++-линкером (libstdc++).
+set_target_properties(quake2 PROPERTIES LINKER_LANGUAGE CXX)
 
 target_include_directories(quake2 PRIVATE
     ${SDL2_INCLUDE_DIRS}
@@ -157,6 +186,7 @@ target_link_libraries(quake2
     ${EGL_LIBRARIES}
     ${WAYLAND_CLIENT_LIBRARIES}
     zlib_quake2
+    imgui
     m
     dl
 )

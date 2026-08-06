@@ -23,7 +23,8 @@
  *   прыжок не мешает целиться;
  * - у всех кнопок предусмотрены иконки: из отдельной текстуры (icon,
  *   Draw_StretchPic) или из атласа (icon + iconS*, Draw_SubPic);
- * - под группами кнопок рисуется полупрозрачная подложка (позже — imgui);
+ * - отрисовка оверлея — через imgui (C-шим aurora_imgui), легаси-фолбэк —
+ *   Draw_FillAlpha, если imgui недоступен;
  * - раскладку можно переопределить конфигом: cvar touch_uiscale и команда
  *   «touchbtn <label> <x> <y> <w> <h>» (exec touchui.cfg в Touch_Init).
  *
@@ -41,6 +42,7 @@
 #if defined(AURORA_OS)
 
 #include "backends/input.h"
+#include "aurora_imgui.h"
 
 #include <SDL2/SDL.h>
 #include <math.h>
@@ -501,44 +503,48 @@ static void Touch_FillCircle(int cx, int cy, int r, float R, float G, float B, f
 	}
 }
 
-/* Полупрозрачная подложка под группой кнопок. Позже переедет на imgui
-   (этап интеграции imgui — лаунчер/клавиатура). */
-static void Touch_DrawPanel(int x, int y, int w, int h)
+/* Отрисовка через imgui (0 — не пробовали, 1 — активен, -1 — недоступен,
+   легаси-отрисовка Draw_FillAlpha). */
+static int l_imguiState = 0;
+static bool l_imgui = false;
+
+static bool Touch_UseImgui(void)
 {
-	int pad = Touch_MmToPx(2.0f);
-	Draw_FillAlpha(x - pad, y - pad, w + 2 * pad, h + 2 * pad, 0.0f, 0.0f, 0.0f, 0.25f);
+	if (l_imguiState == 0)
+		/* Высота глифа ~3 мм от DPI (imgui-theme-spec.md, секция 3),
+		   кламп 14..96 px — внутри AuroraImgui_Init. */
+		l_imguiState = AuroraImgui_Init((float)Touch_MmToPx(3.0f)) ? 1 : -1;
+	return l_imguiState > 0;
 }
 
-/* Подложки под группами игровых кнопок. */
-static void Touch_DrawGamePanels(void)
-{
-	touchButton_t *esc = &touchButtons[TB_ESC];
-	touchButton_t *hlp = &touchButtons[TB_HELP];
-	touchButton_t *fire = &touchButtons[TB_FIRE];
-	touchButton_t *jump = &touchButtons[TB_JUMP];
-	touchButton_t *duck = &touchButtons[TB_CROUCH];
-	touchButton_t *itp = &touchButtons[TB_ITEM_PREV];
-	touchButton_t *itn = &touchButtons[TB_ITEM_NEXT];
-	touchButton_t *wpp = &touchButtons[TB_WEAP_PREV];
-	touchButton_t *wpn = &touchButtons[TB_WEAP_NEXT];
-
-	/* ESC+HELP (верхний левый угол). */
-	Touch_DrawPanel(esc->x, esc->y, hlp->x + hlp->w - esc->x, esc->h);
-	/* Правая колонка JUMP/FIRE/DUCK. */
-	Touch_DrawPanel(fire->x, jump->y, jump->x + jump->w - fire->x,
-		duck->y + duck->h - jump->y);
-	/* Предметы (верхняя середина). */
-	Touch_DrawPanel(itp->x, itp->y, itn->x + itn->w - itp->x, itp->h);
-	/* Оружие (нижняя середина). */
-	Touch_DrawPanel(wpp->x, wpp->y, wpn->x + wpn->w - wpp->x, wpp->h);
-}
+/* Подложки под группами кнопок УБРАНЫ (указание пользователя 2026-08-06):
+   жёстких групп нет, кнопки потом можно будет расставить как угодно. */
 
 static void Touch_DrawButton(const touchButton_t *b)
 {
+	if (l_imgui)
+	{
+		/* Рамка/подложка — через imgui; иконка (если есть) — легаси-путём,
+		   она ляжет под полупрозрачную рамку при рендере imgui в конце. */
+		AuroraImgui_Button((float)b->x, (float)b->y, (float)b->w, (float)b->h,
+			b->icon != NULL ? NULL : b->label, b->pressed);
+		if (b->icon != NULL)
+		{
+			int pad = Touch_MmToPx(2.0f);
+			if (b->iconSw > 0 && b->iconSh > 0)
+				Draw_SubPic(b->x + pad, b->y + pad, b->w - 2 * pad, b->h - 2 * pad,
+					(char *)b->icon, b->iconSx, b->iconSy, b->iconSw, b->iconSh);
+			else
+				Draw_StretchPic(b->x + pad, b->y + pad, b->w - 2 * pad, b->h - 2 * pad,
+					(char *)b->icon);
+		}
+		return;
+	}
+
 	if (b->pressed)
-		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.9f, 0.9f, 0.9f, 0.6f);
+		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.9f, 0.9f, 0.9f, 0.4f);
 	else
-		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.1f, 0.1f, 0.1f, 0.45f);
+		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.1f, 0.1f, 0.1f, 0.15f);
 
 	if (b->icon != NULL)
 	{
@@ -576,9 +582,9 @@ void Touch_DrawOverlay(void)
 
 	Touch_Layout();
 
-	/* Подложки под группами кнопок — до самих кнопок. */
-	if (context == TBF_GAME)
-		Touch_DrawGamePanels();
+	l_imgui = Touch_UseImgui();
+	if (l_imgui)
+		AuroraImgui_NewFrame(viddef.width, viddef.height);
 
 	for (int i = 0; i < (int)TOUCH_NUM_BUTTONS; i++)
 	{
@@ -590,9 +596,20 @@ void Touch_DrawOverlay(void)
 	/* Плавающий стик: база + ручка. */
 	if (stickActive && context == TBF_GAME)
 	{
-		Touch_FillCircle(stickBaseX, stickBaseY, stickBaseR, 0.1f, 0.1f, 0.1f, 0.35f);
-		Touch_FillCircle(stickKnobX, stickKnobY, stickKnobR, 0.9f, 0.9f, 0.9f, 0.5f);
+		if (l_imgui)
+		{
+			AuroraImgui_StickCircle((float)stickBaseX, (float)stickBaseY, (float)stickBaseR, false);
+			AuroraImgui_StickCircle((float)stickKnobX, (float)stickKnobY, (float)stickKnobR, true);
+		}
+		else
+		{
+			Touch_FillCircle(stickBaseX, stickBaseY, stickBaseR, 0.1f, 0.1f, 0.1f, 0.35f);
+			Touch_FillCircle(stickKnobX, stickKnobY, stickKnobR, 0.9f, 0.9f, 0.9f, 0.5f);
+		}
 	}
+
+	if (l_imgui)
+		AuroraImgui_Render();
 }
 
 #else /* !AURORA_OS — заглушки, чтобы модуль собирался на всех платформах. */
