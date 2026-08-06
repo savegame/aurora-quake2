@@ -49,4 +49,12 @@ void IN_Shutdown();
  */
 void IN_Update();
 
+/*
+ * Тач-инъекции (ОС Аврора): накопление дельты осмотра (как движение
+ * мыши, применяется в IN_Move) и аналоговый вектор движения стика
+ * (x — страйф вправо, y — вперёд; оба -1..1, 0 — нет ввода).
+ */
+void IN_AddTouchLook(float dx, float dy);
+void IN_SetTouchStick(float x, float y);
+
 #endif

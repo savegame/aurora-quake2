@@ -39,6 +39,22 @@ cvar_t *mouse_speed_pitch;
 cvar_t *mouse_speed_yaw;
 
 static int l_mouseX, l_mouseY;
+
+/* Тач-стик (ОС Аврора): текущий аналоговый вектор движения,
+   выставляется тач-оверлеем (cl_touch.c) через IN_SetTouchStick. */
+static float l_touchStickX, l_touchStickY;
+
+void IN_AddTouchLook(float dx, float dy)
+{
+	l_mouseX += (int)dx;
+	l_mouseY += (int)dy;
+}
+
+void IN_SetTouchStick(float x, float y)
+{
+	l_touchStickX = x;
+	l_touchStickY = y;
+}
 static int l_mouseOldX, l_mouseOldY;
 static SDL_Joystick *l_joystick = NULL;
 static SDL_GameController *l_controller = NULL;
@@ -595,6 +611,13 @@ void IN_Move(usercmd_t *cmd)
         cmd->sidemove += cl_speed_side->value * joyX * running;
         cmd->forwardmove += cl_speed_forward->value * joyY * running;
     }
+
+#if defined(AURORA_OS)
+    /* Тач-стик (виртуальный): как правый стик контроллера —
+       напрямую в движение. */
+    cmd->sidemove += cl_speed_side->value * l_touchStickX * running;
+    cmd->forwardmove += cl_speed_forward->value * l_touchStickY * running;
+#endif
 
     /* add mouse X/Y movement to cmd */
     if ((in_strafe.state & 1) || (input_lookstrafe->value && (in_mlook.state & 1)))

@@ -162,6 +162,34 @@ void Draw_Pic(int x, int y, char *pic)
 	Draw_PicScaled(x, y, pic, 1.0f);
 }
 
+void Draw_SubPic(int x, int y, int w, int h, char *pic, int sx, int sy, int sw, int sh)
+{
+	image_t *gl = Draw_FindPic(pic);
+	if (!gl)
+	{
+		R_printf(PRINT_ALL, "Can't find pic: %s\n", pic);
+		return;
+	}
+
+	if (scrap_dirty)
+		Scrap_Upload();
+
+	/* UV подрегиона (sx..sx+sw, sy..sy+sh — пиксели исходной текстуры). */
+	float du = (gl->sh - gl->sl) / gl->width;
+	float dv = (gl->th - gl->tl) / gl->height;
+	float sl = gl->sl + sx * du;
+	float tl = gl->tl + sy * dv;
+	float sh2 = gl->sl + (sx + sw) * du;
+	float th2 = gl->tl + (sy + sh) * dv;
+
+	oglwBindTexture(0, gl->texnum);
+	oglwBegin(GL_QUADS);
+	OglwVertex *v = oglwAllocateVertex(4);
+    if (v)
+        AddQuad2D_T1(v, x, y, x + w, y + h, sl, tl, sh2, th2);
+	oglwEnd();
+}
+
 void Draw_PicScaled(int x, int y, char *pic, float factor)
 {
 	image_t *gl = Draw_FindPic(pic);

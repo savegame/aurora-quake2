@@ -37,6 +37,7 @@ static struct
 	GLuint program;
 	GLint uRot;
 	GLint uTex;
+	GLint uGamma;
 	int screenW, screenH; /* реальный размер окна */
 	int fboW, fboH;       /* размер буфера рендеринга */
 	float scale;
@@ -82,9 +83,13 @@ static const char l_fragmentShaderSrc[] =
 	"precision mediump float;\n"
 	"varying vec2 v_uv;\n"
 	"uniform sampler2D u_tex;\n"
+	"uniform float u_gamma;\n"
 	"void main()\n"
 	"{\n"
-	"	gl_FragColor = texture2D(u_tex, v_uv);\n"
+	"	vec4 c = texture2D(u_tex, v_uv);\n"
+	/* Яркость (меню «brightness» = r_gamma): hardware gamma ramp на
+	   Wayland не работает, поэтому гамма применяется здесь, при блите. */
+	"	gl_FragColor = vec4(pow(c.rgb, vec3(u_gamma)), c.a);\n"
 	"}\n";
 
 static GLuint RFBO_CompileShader(GLenum type, const char *src)
@@ -213,6 +218,7 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 		return false;
 	l_fbo.uRot = glGetUniformLocation(l_fbo.program, "u_rot");
 	l_fbo.uTex = glGetUniformLocation(l_fbo.program, "u_tex");
+	l_fbo.uGamma = glGetUniformLocation(l_fbo.program, "u_gamma");
 
 	l_fbo.screenW = windowWidth;
 	l_fbo.screenH = windowHeight;
@@ -294,6 +300,11 @@ void RFBO_DrawToScreen(void)
 	glUseProgram(l_fbo.program);
 	glUniformMatrix2fv(l_fbo.uRot, 1, GL_FALSE, l_rotMatrices[l_fbo.rotation & 3]);
 	glUniform1i(l_fbo.uTex, 0);
+	/* Гамма (яркость) — как в R_Gamma_calculateRamp: pow(v, 1/r_gamma). */
+	float gamma = r_gamma->value;
+	if (gamma <= 0.0f)
+		gamma = 1.0f;
+	glUniform1f(l_fbo.uGamma, 1.0f / gamma);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, l_fbo.colorTex);
 

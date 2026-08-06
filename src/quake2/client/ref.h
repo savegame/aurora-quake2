@@ -193,6 +193,8 @@ void Draw_GetPicSize(int *w, int *h, char *name);
 void Draw_Pic(int x, int y, char *name);
 void Draw_StretchPic(int x, int y, int w, int h, char *name);
 void Draw_PicScaled(int x, int y, char *pic, float factor);
+/* Подрегион текстуры (атлас): sx/sy/sw/sh — пиксели в исходной текстуре. */
+void Draw_SubPic(int x, int y, int w, int h, char *pic, int sx, int sy, int sw, int sh);
 
 void Draw_CharBegin();
 void Draw_CharEnd();

@@ -3277,7 +3277,9 @@ void R_View_setLightLevel()
 
 static void R_Gamma_initialize()
 {
-	#if defined(HARDWARE_GAMMA_ENABLED)
+	#if defined(AURORA_FBO)
+	R_printf(PRINT_ALL, "Using shader gamma via FBO blit.\n");
+	#elif defined(HARDWARE_GAMMA_ENABLED)
 	R_printf(PRINT_ALL, "Using hardware gamma via SDL.\n");
 	#endif
 	gl_state.hwgamma = true;
@@ -3330,7 +3332,11 @@ static void R_Gamma_calculateRamp(float gamma, Uint16 * ramp, int len)
 // Sets the hardware gamma
 static void R_Gamma_update()
 {
-	#if defined(HARDWARE_GAMMA_ENABLED)
+	#if defined(AURORA_FBO)
+	/* На Авроре (Wayland) hardware gamma ramp не поддерживается — гамма
+	   применяется в шейдере блита FBO (RFBO_DrawToScreen). SDL-вызов
+	   пропускаем, чтобы не спамить "Setting gamma failed". */
+	#elif defined(HARDWARE_GAMMA_ENABLED)
 	float gamma = (r_gamma->value);
 
 	Uint16 ramp[256];
