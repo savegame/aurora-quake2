@@ -7,8 +7,9 @@
  * (EGLWrapper). Тема и шрифт — общие с in-game оверлеем (aurora_imgui).
  *
  * Тач-ввод: SDL на Авроре шлёт события пальца (tfinger, нормированные
- * 0..1), а не мышь — тап (<16 px) превращается в mouse down+up, драг —
- * в импульсы MouseWheel для прокрутки списков imgui.
+ * 0..1), а не мышь (синтез мыши из тача выключен хинтом в Launcher_Run) —
+ * тап (<16 px) превращается в mouse down+up, драг — в импульсы MouseWheel
+ * для прокрутки списков imgui.
  *
  * Активно только под AURORA_OS; на остальных платформах файл пустой.
  */
@@ -89,6 +90,13 @@ struct PickerState
 };
 
 PickerState g_picker;
+
+/* Отложенное открытие браузера каталогов: кнопка «Выбрать папку...»
+   срабатывает на release тапа, а браузер рисуется в том же кадре позже —
+   без отсрочки тот же release «проваливался» в только что открывшееся
+   окно и кликал кнопку под пальцем. Флаг выставляется по клику,
+   открытие — в начале следующего кадра (DrawLauncherUI). */
+bool g_browser_open_pending = false;
 
 /* Результат: куда стартуем ("" = baseq2, иначе имя мода). */
 bool        g_launch = false;
@@ -459,10 +467,7 @@ void DrawTab_Game()
 
 	ImGui::Spacing();
 	if( ImGui::Button( "Выбрать папку...", ImVec2( -1, btn_h )))
-	{
-		g_picker.current_dir  = DefaultBrowserDir();
-		g_picker.browser_open = true;
-	}
+		g_browser_open_pending = true; /* откроется на следующем кадре */
 
 	ImGui::Spacing();
 	if( g_picker.selected.empty())
@@ -648,6 +653,15 @@ void DrawTabsRow()
  * ------------------------------------------------------------------------- */
 void DrawLauncherUI( bool &user_quit, int win_w, int win_h )
 {
+	/* Отложенное открытие браузера — здесь, в начале кадра: release тапа,
+	   открывшего его, остался в прошлом кадре и в окно не провалится. */
+	if( g_browser_open_pending )
+	{
+		g_browser_open_pending = false;
+		g_picker.current_dir   = DefaultBrowserDir();
+		g_picker.browser_open  = true;
+	}
+
 	ImGui::SetNextWindowPos(  ImVec2( 0, 0 ));
 	ImGui::SetNextWindowSize( ImVec2( (float)win_w, (float)win_h ));
 	ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar
@@ -743,6 +757,14 @@ void DrawLoadingFrame( SDL_Window *window )
 
 extern "C" int Launcher_Run( void )
 {
+	/* Не даём SDL синтезировать мышь из тача: лаунчер сам конвертирует
+	   тапы/драги (ProcessTouchEvent), а при включённом синтезе каждый тап
+	   приходил дважды (пара от SDL + наша) — двойные клики по кнопкам.
+	   Ставим ДО SDL_Init(SDL_INIT_VIDEO): значение хинта подхватывается
+	   колбеком при инициализации мыши. Движок позже выставляет тот же
+	   хинт в IN_Init (input_sdl.c) — конфликта нет. */
+	SDL_SetHint( SDL_HINT_TOUCH_MOUSE_EVENTS, "0" );
+
 	/* sdlwInitialize вызван в Qcommon_Init с нулевыми флагами — подсистему
 	   видео при необходимости поднимаем здесь. */
 	if( SDL_WasInit( SDL_INIT_VIDEO ) == 0 )
