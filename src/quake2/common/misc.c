@@ -29,6 +29,10 @@
 
 #include "SDL/SDLWrapper.h"
 
+#if defined(AURORA_OS)
+#include "client/aurora_launcher.h"
+#endif
+
 #include <setjmp.h>
 
 FILE *log_stats_file;
@@ -195,6 +199,18 @@ static void Qcommon_Init(int argc, char **argv)
 	sdlwInitialize(IN_processEvent, 0);
 	sdlwEnableDefaultEventManagement(false);
 
+#if defined(AURORA_OS)
+	/* In-process лаунчер: создаёт окно и EGL-контекст (их движок дальше
+	   подхватывает как свои), передаёт выбор ресурсов/мода через env.
+	   AURORA_LAUNCHER_SKIP — отладочный обход (автопрогоны на устройстве):
+	   ресурсы берутся из стандартных путей поиска. */
+	if (!getenv("AURORA_LAUNCHER_SKIP"))
+	{
+		if (Launcher_Run() != 0)
+			exit(0);
+	}
+#endif
+
 	/* prepare enough of the subsystems to handle
 	   cvar and command buffer management */
 	COM_InitArgv(argc, argv);
@@ -204,6 +220,16 @@ static void Qcommon_Init(int argc, char **argv)
 
 	Cmd_Init();
 	Cvar_Init();
+
+#if defined(AURORA_OS)
+	/* Мод, выбранный в лаунчере (xatrix/rogue/ctf). Cvar_Get с тем же
+	   именем/флагами, что и в filesystem.c, — там значение сохранится. */
+	{
+		char *mod = getenv("AURORA_GAME_MOD");
+		if (mod != NULL && mod[0] != '\0')
+			Cvar_Get("game", mod, CVAR_LATCH | CVAR_SERVERINFO);
+	}
+#endif
 
 	#ifndef DEDICATED_ONLY
 	Key_Init();

@@ -127,11 +127,15 @@ add_library(imgui STATIC
     imgui/imgui_tables.cpp
     imgui/imgui_widgets.cpp
     imgui/imgui_impl_opengl3.cpp
+    imgui/imgui_impl_sdl2.cpp
 )
 target_include_directories(imgui PUBLIC
     imgui
     ${GLESV2_INCLUDE_DIRS}
 )
+# SDL2-бэкенду (лаунчер) нужны заголовки SDL (<SDL.h>, <SDL_syswm.h>) —
+# берём их через usage-requirements SDL-цели, как у цели quake2.
+target_link_libraries(imgui PRIVATE ${SDL2_TARGET})
 # ES3, а не ES2: бэкенд с ES2-дефайном не изолирует vertex attrib state
 # (атрибуты 0-2 перетирают низкие attribute locations OpenGLWrapper'а —
 # после первого кадра imgui рендер игры рассыпается). ES3-путь использует
@@ -167,6 +171,8 @@ list(FILTER QUAKE2_SOURCES EXCLUDE REGEX "src/quake2/backends/windows/.*")
 
 # C++-шим над imgui (glob выше собирает только *.c).
 list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_imgui.cpp)
+# In-process лаунчер на ImGui (выбор ресурсов/настройки до старта движка).
+list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_launcher.cpp)
 
 add_executable(quake2 ${QUAKE2_SOURCES})
 

@@ -1010,8 +1010,13 @@ static void FS_AddGameDirectories(const char * dir)
 	FS_AddHomeAsGameDirectory(dir);
 	#if defined(AURORA_OS)
 	{
-		// On Aurora the game data (e.g. Steam version) can be put into
-		// ~/Downloads/Games/Quake2 by the user.
+		// Путь к ресурсам, выбранный пользователем в лаунчере.
+		const char *resdir = getenv("AURORA_RESDIR");
+		if (resdir != NULL && resdir[0] != '\0')
+			FS_AddGameDirectory(va("%s/%s", resdir, dir));
+
+		// Фолбэк: ресурсы (например, из Steam-версии) могут лежать в
+		// ~/Downloads/Games/Quake2.
 		const char *homeEnv = getenv("HOME");
 		if (homeEnv != NULL && homeEnv[0] != '\0')
 			FS_AddGameDirectory(va("%s/%s/%s", homeEnv, "Downloads/Games/Quake2", dir));

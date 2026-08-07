@@ -3867,12 +3867,18 @@ static void R_Window_getValidWindowSize(int maxWindowWidth, int maxWindowHeight,
 
 static bool R_Window_setup()
 {
+#if defined(AURORA_OS)
+    /* На Авроре окно всегда fullscreen и его размер диктует композитор
+       (lipstick/wl-shell). Дёргать SDL_SetWindowDisplayMode/SDL_SetWindowSize
+       нельзя: SDL синхронно перезаписывает window->w/h размером display mode
+       (ландшафтный desktop mode 2400x1080), и при запуске из лаунчера это
+       значение застывает навсегда (wl-shell configure уже обработан лаунчером)
+       — FBO и viewport блита получают неверные размеры, на экране видна только
+       часть рендера. Размер окна под Авророй не меняем. */
+    return false;
+#else
 	SdlwContext *sdlw = sdlwContext;
-    #if defined(AURORA_OS)
-    bool fullscreen = true;
-    #else
     bool fullscreen = r_fullscreen->value;
-    #endif
     if (fullscreen)
     {
         SDL_DisplayMode displayMode;
@@ -3897,6 +3903,7 @@ static bool R_Window_setup()
         SDL_SetWindowSize(sdlw->window, windowWidth, windowHeight);
     }
     return false;
+#endif
 }
 
 static void R_restart();
@@ -4099,6 +4106,12 @@ static bool R_Window_update(bool forceFlag)
 
 static bool R_Window_createContext()
 {
+#if defined(AURORA_OS)
+	/* На Авроре окно и EGL-контекст создаёт лаунчер (Launcher_Run) —
+	   повторная инициализация EGL не нужна и опасна. */
+	if (eglwContext == NULL)
+	{
+#endif
 	while (1)
 	{
 		EglwConfigInfo cfgiMinimal;
@@ -4127,6 +4140,9 @@ static bool R_Window_createContext()
 			break;
 		}
 	}
+#if defined(AURORA_OS)
+	}
+#endif
 
 	r_msaaAvailable = (eglwContext->configInfoAbilities.samples > 0);
 	Cvar_SetValue("r_msaa_samples", eglwContext->configInfo.samples);

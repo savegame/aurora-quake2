@@ -202,6 +202,13 @@ static void RFBO_ComputeSize(int windowWidth, int windowHeight, int *fboW, int *
 	int h = swapped ? windowWidth : windowHeight;
 	*fboW = (int)(w * l_fbo.scale + 0.5f);
 	*fboH = (int)(h * l_fbo.scale + 0.5f);
+	/* При масштабировании округляем до чётных (нечётные размеры не все
+	   GPU любят). При scale=1.0 размеры бит-в-бит как раньше. */
+	if (l_fbo.scale != 1.0f)
+	{
+		*fboW &= ~1;
+		*fboH &= ~1;
+	}
 }
 
 bool RFBO_Init(int windowWidth, int windowHeight)
@@ -211,6 +218,23 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 	int rotation = l_fbo.rotation;
 	memset(&l_fbo, 0, sizeof(l_fbo));
 	l_fbo.scale = 1.0f;
+#if defined(AURORA_OS)
+	/* Множитель разрешения рендера из лаунчера (env AURORA_R_3D_SCALE),
+	   читаем один раз. RFBO_ComputeSize применит его к размеру FBO
+	   (после поворотной логики). */
+	{
+		const char *s = getenv("AURORA_R_3D_SCALE");
+		if (s != NULL && s[0] != '\0')
+		{
+			float v = (float)atof(s);
+			if (v < 0.25f)
+				v = 0.25f;
+			if (v > 2.0f)
+				v = 2.0f;
+			l_fbo.scale = v;
+		}
+	}
+#endif
 	l_fbo.rotation = rotation;
 
 	l_fbo.program = RFBO_CreateProgram();
@@ -236,6 +260,15 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 
 	l_fbo.ready = true;
 	R_printf(PRINT_ALL, "RFBO: %ix%i -> screen %ix%i\n", l_fbo.fboW, l_fbo.fboH, l_fbo.screenW, l_fbo.screenH);
+	/* Временная диагностика: что SDL сообщает о дисплее на старте рендера. */
+	{
+		SDL_DisplayMode dm;
+		SDL_Rect ub;
+		if (SDL_GetDesktopDisplayMode(0, &dm) == 0)
+			R_printf(PRINT_ALL, "RFBO: desktop display mode %ix%i\n", dm.w, dm.h);
+		if (SDL_GetDisplayUsableBounds(0, &ub) == 0)
+			R_printf(PRINT_ALL, "RFBO: usable bounds %ix%i\n", ub.w, ub.h);
+	}
 	return true;
 }
 

@@ -41,6 +41,11 @@ void AuroraImgui_Panel(float x, float y, float w, float h);
 void AuroraImgui_Button(float x, float y, float w, float h, const char *label, bool pressed);
 void AuroraImgui_StickCircle(float cx, float cy, float r, bool knob);
 
+/* Тема по imgui-theme-spec.md (палитра + метрики от размера шрифта).
+   Общая для in-game оверлея и лаунчера. Вызывать при текущем контексте
+   imgui (после ImGui::CreateContext). */
+void AuroraImgui_ApplyTheme(float fontSizePx);
+
 #ifdef __cplusplus
 }
 #endif

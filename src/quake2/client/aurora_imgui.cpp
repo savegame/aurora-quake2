@@ -44,8 +44,9 @@ static ImU32 ThemeColor(ImVec4 c, float alpha)
 }
 
 /* Тема по imgui-theme-spec.md: базовая сетка метрик (под шрифт 13 px)
-   + масштаб всей сетки от фактического размера шрифта. */
-static void ApplyTheme(float fontSizePx)
+   + масштаб всей сетки от фактического размера шрифта.
+   Нестатическая: используется и лаунчером (aurora_launcher.cpp). */
+void AuroraImgui_ApplyTheme(float fontSizePx)
 {
 	ImGui::StyleColorsDark();
 
@@ -63,6 +64,11 @@ static void ApplyTheme(float fontSizePx)
 	s.ScrollbarSize      = 10.0f;
 	s.TabRounding        = 0.0f;
 	s.ScaleAllSizes(fontSizePx / 13.0f);
+
+	/* Фирменное скругление кнопок порта: ~30% высоты кнопки при высоте
+	   кнопки ~3.3 font. Сознательное отступление от спеки (там 2 px);
+	   ставим ПОСЛЕ ScaleAllSizes, чтобы значение не масштабировалось. */
+	s.FrameRounding      = fontSizePx;
 
 	ImVec4 *c = s.Colors;
 	c[ImGuiCol_WindowBg]         = Theme::BgWindow;
@@ -105,13 +111,21 @@ bool AuroraImgui_Init(float fontSizePx)
 	io.IniFilename = NULL; /* imgui.ini не пишем (песочница) */
 	io.LogFilename = NULL;
 
-	ApplyTheme(fontSizePx);
+	AuroraImgui_ApplyTheme(fontSizePx);
 
-	/* Шрифт — Noto Sans Bold с кириллицей, размер от DPI (~3 мм,
-	   кламп выше). Данные проверены хост-тестом (атлас, 624 глифа). */
+	/* Шрифт — Noto Sans Bold, размер от DPI (~3 мм, кламп выше). Данные
+	   проверены хост-тестом (атлас, 624 глифа). Диапазоны — явно:
+	   Latin-1 + Cyrillic + General Punctuation (тире 0x2014 и пр. — в
+	   GetGlyphRangesCyrillic их нет). */
+	static const ImWchar kGlyphRanges[] = {
+		0x0020, 0x00FF, /* Latin-1 + пунктуация */
+		0x0400, 0x04FF, /* Cyrillic */
+		0x2010, 0x205E, /* General Punctuation (— „ “ ” …) */
+		0,
+	};
 	ImFont *font = io.Fonts->AddFontFromMemoryCompressedTTF(
 		NotoSansBold_compressed_data, NotoSansBold_compressed_size,
-		fontSizePx, NULL, io.Fonts->GetGlyphRangesCyrillic());
+		fontSizePx, NULL, kGlyphRanges);
 	if (font == NULL)
 	{
 		ImGui::DestroyContext();

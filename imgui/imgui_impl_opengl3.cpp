@@ -666,7 +666,16 @@ void ImGui_ImplOpenGL3_DestroyFontsTexture()
     ImGui_ImplOpenGL3_Data* bd = ImGui_ImplOpenGL3_GetBackendData();
     if (bd->FontTexture)
     {
+#ifdef AURORA_IMGUI_FONT_TEX_ID
+        // AURORA: фиксированный id НЕ удаляем. glDeleteTextures вернёт имя в пул
+        // драйвера, и glGenTextures FBO-модуля движка (RFBO_CreateTargets) может
+        // получить тот же id для цветового аттачмента — тогда атлас шрифта
+        // тач-оверлея заливается прямо в текстуру, в которую рендерится сцена
+        // (битый touch_ui при запуске игры из лаунчера). Имя остаётся занятым
+        // навсегда; перезаливка атласа в то же имя безопасна.
+#else
         glDeleteTextures(1, &bd->FontTexture);
+#endif
         io.Fonts->SetTexID(0);
         bd->FontTexture = 0;
     }
