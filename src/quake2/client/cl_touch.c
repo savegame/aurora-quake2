@@ -44,6 +44,10 @@
 #include "backends/input.h"
 #include "aurora_imgui.h"
 
+#if defined(AURORA_FBO)
+#include "refresh/r_fbo.h"
+#endif
+
 #include <SDL2/SDL.h>
 #include <math.h>
 
@@ -106,13 +110,14 @@ enum
 	TB_WEAP_PREV, TB_WEAP_NEXT
 };
 
-static int touchMm;          /* пикселей в миллиметре */
+static int touchMm;          /* экранных пикселей в миллиметре (от DPI дисплея) */
 static int touchLayoutW = 0; /* размеры экрана, под которые посчитана раскладка */
 static int touchLayoutH = 0;
 
 static cvar_t *touch_looksens;
 static cvar_t *touch_uiscale;
-static float touchLayoutScale = 0.0f; /* scale, под который посчитана раскладка */
+static float touchLayoutScale = 0.0f;    /* touch_uiscale, под который посчитана раскладка */
+static float touchLayoutFboScale = 0.0f; /* scale FBO, под который посчитана раскладка */
 
 /* Переопределения раскладки из конфига (команда touchbtn, exec touchui.cfg). */
 static bool touchOvr[TOUCH_NUM_BUTTONS];
@@ -132,9 +137,25 @@ static bool lookActive;
 static SDL_FingerID lookFinger;
 static float lookLastX, lookLastY;
 
+/* Масштаб буфера рендеринга («3D scale» из лаунчера). Сцена и тач-UI
+   рисуются в FBO размером экран*scale, а затем FBO растягивается квадом
+   на весь экран — пиксель FBO на экране занимает 1/scale экранных пикселей.
+   Чтобы физический размер элементов UI (в мм) не зависел от 3D scale, все
+   переводы мм->px делаем в пиксели FBO с этим коэффициентом. Тач-ввод уже
+   приходит в пикселях FBO (RFBO_TransformTouch), поэтому хит-тест и
+   отрисовка остаются в одной системе координат при любом scale. */
+static float Touch_FboScale(void)
+{
+#if defined(AURORA_FBO)
+	return RFBO_GetScale();
+#else
+	return 1.0f;
+#endif
+}
+
 static int Touch_MmToPx(float mm)
 {
-	return (int)(mm * touchMm + 0.5f);
+	return (int)(mm * touchMm * Touch_FboScale() + 0.5f);
 }
 
 static void Touch_Layout(void)
@@ -145,13 +166,15 @@ static void Touch_Layout(void)
 	if (uscale > 3.0f)
 		uscale = 3.0f;
 
+	float fboScale = Touch_FboScale();
 	if (viddef.width == touchLayoutW && viddef.height == touchLayoutH &&
-	    uscale == touchLayoutScale)
+	    uscale == touchLayoutScale && fboScale == touchLayoutFboScale)
 		return;
 
 	touchLayoutW = viddef.width;
 	touchLayoutH = viddef.height;
 	touchLayoutScale = uscale;
+	touchLayoutFboScale = fboScale;
 
 	int size = Touch_MmToPx(13.0f * uscale);
 	int sizeBig = Touch_MmToPx(16.0f * uscale);
@@ -282,6 +305,7 @@ void Touch_Init(void)
 
 	touchLayoutW = touchLayoutH = 0;
 	touchLayoutScale = 0.0f;
+	touchLayoutFboScale = 0.0f;
 	Touch_Layout();
 
 	/* Пользовательские переопределения раскладки (необязательный файл). */
@@ -438,8 +462,10 @@ void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y)
 		{
 			/* Чувствительность нормализована к миллиметрам: при высоком DPI
 			   за тот же жест (в мм) приходит больше пикселей — компенсируем
-			   (32 px/mm — подобрано на устройстве с высоким DPI). */
-			float sens = touch_looksens->value * (32.0f / touchMm);
+			   (32 px/mm — подобрано на устройстве с высоким DPI). Дельты
+			   приходят в пикселях FBO, а миллиметр на экране — это
+			   touchMm*scale пикселей FBO, поэтому учитываем и 3D scale. */
+			float sens = touch_looksens->value * (32.0f / (touchMm * Touch_FboScale()));
 			IN_AddTouchLook((x - lookLastX) * sens, (y - lookLastY) * sens);
 			lookLastX = x;
 			lookLastY = y;
@@ -511,8 +537,10 @@ static bool l_imgui = false;
 static bool Touch_UseImgui(void)
 {
 	if (l_imguiState == 0)
-		/* Высота глифа ~3 мм от DPI (imgui-theme-spec.md, секция 3),
-		   кламп 14..96 px — внутри AuroraImgui_Init. */
+		/* Высота глифа ~3 мм от DPI (imgui-theme-spec.md, секция 3);
+		   Touch_MmToPx даёт пиксели FBO (с 3D scale), так что физический
+		   размер шрифта на экране от scale не зависит. Кламп 14..96 px —
+		   внутри AuroraImgui_Init. */
 		l_imguiState = AuroraImgui_Init((float)Touch_MmToPx(3.0f)) ? 1 : -1;
 	return l_imguiState > 0;
 }

@@ -32,7 +32,8 @@ void RFBO_DrawToScreen(void);
 void RFBO_GetSize(int *width, int *height);
 
 /* Коэффициент масштабирования рендеринга (0.25..2.0, по умолчанию 1.0).
-   Применяется при создании/пересоздании FBO. */
+   Применяется при создании/пересоздании FBO. Геттер возвращает 1.0, пока
+   FBO не готов (рендер напрямую на экран — масштаб не действует). */
 void RFBO_SetScale(float scale);
 float RFBO_GetScale(void);
 

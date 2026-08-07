@@ -374,6 +374,10 @@ void RFBO_SetScale(float scale)
 
 float RFBO_GetScale(void)
 {
+	/* Пока FBO не готов (до Init, после Shutdown или если Init не удался),
+	   рендер идёт напрямую на экран — масштаба нет. */
+	if (!l_fbo.ready)
+		return 1.0f;
 	return l_fbo.scale;
 }
 
