@@ -1308,6 +1308,10 @@ void SCR_UpdateScreen()
 				}
 
 				SCR_DrawConsole();
+#if defined(AURORA_OS)
+				if (i == numframes - 1)
+					Touch_DrawOverlay();
+#endif
 			}
 			else
 			{

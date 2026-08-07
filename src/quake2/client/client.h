@@ -512,6 +512,7 @@ void CL_TrapParticles(entity_t *ent);
 void M_Init();
 void M_Keydown(int key, int keyUnmodified);
 void M_Draw();
+qboolean M_CursorOnTextField(); /* тач-клавиатура: курсор активного меню на текстовом поле */
 void MenuMain_enter();
 void M_ForceMenuOff();
 void M_AddToServerList(netadr_t adr, char *info);

@@ -216,21 +216,22 @@ void AuroraImgui_Button(float x, float y, float w, float h, const char *label, b
 	ImVec2 p0(x, y), p1(x + w, y + h);
 
 	/* Скругление — заметно сильнее темы (пожелание пользователя):
-	   30% высоты кнопки. Заливка полупрозрачная (поверх игры). */
+	   30% высоты кнопки. Заливка тёмная, почти непрозрачная (поверх игры). */
 	float rounding = h * 0.3f;
 
 	/* Нажатая — ButtonActive + обводка accent.line (спека: активные
-	   состояния — акцентные), обычная — полупрозрачный Button. */
+	   состояния — акцентные), обычная — тёмная почти непрозрачная
+	   (пожелание пользователя: меньше прозрачности, темнее). */
 	if (pressed)
 	{
-		dl->AddRectFilled(p0, p1, ThemeColor(Theme::ButtonActive, 0.40f), rounding);
+		dl->AddRectFilled(p0, p1, ThemeColor(Theme::ButtonActive, 0.55f), rounding);
 		dl->AddRect(p0, p1, ThemeColor(Theme::AccentLine, 0.9f), rounding,
 			0, style.FrameBorderSize);
 	}
 	else
 	{
-		dl->AddRectFilled(p0, p1, ThemeColor(Theme::FrameHover, 0.20f), rounding);
-		dl->AddRect(p0, p1, ThemeColor(Theme::Border, 0.75f), rounding,
+		dl->AddRectFilled(p0, p1, ThemeColor(THEME_HEX(0x101014), 0.55f), rounding);
+		dl->AddRect(p0, p1, ThemeColor(Theme::Border, 0.8f), rounding,
 			0, style.FrameBorderSize);
 	}
 

@@ -38,6 +38,22 @@ static void Separator_Draw(menuseparator_s *s);
 static void Slider_DoSlide(menuslider_s *s, int dir);
 static void Slider_Draw(menuslider_s *s);
 static void SpinControl_Draw(menulist_s *s);
+
+/* Меню, прошедшее через Menu_Draw на этом кадре (активное). */
+static menuframework_s *s_drawnMenu = NULL;
+
+/* Тач-клавиатура (ОС Аврора): true, если курсор активного меню стоит на
+   текстовом поле (MTYPE_FIELD) — значит, запрошен ввод текста. */
+qboolean M_CursorOnTextField(void)
+{
+	menucommon_s *item;
+
+	if (cls.key_dest != key_menu || s_drawnMenu == NULL)
+		return false;
+
+	item = (menucommon_s *)Menu_ItemAtCursor(s_drawnMenu);
+	return item != NULL && item->type == MTYPE_FIELD;
+}
 static void SpinControl_DoSlide(menulist_s *s, int dir);
 
 #define RCOLUMN_OFFSET 16
@@ -380,6 +396,9 @@ void Menu_Draw(menuframework_s *menu)
 {
 	menucommon_s *item;
 	float scale = SCR_GetMenuScale();
+
+	/* Активное меню (рисуется каждый кадр) — для M_CursorOnTextField. */
+	s_drawnMenu = menu;
 
 	/* draw contents */
 	int itemPerPageNb = menu->itemPerPageNb;

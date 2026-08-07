@@ -33,6 +33,12 @@
  * по action-кнопке (cl_input.c: cmd->buttons, >1с ролика, не attractloop),
  * поэтому SKIP шлёт +attack/-attack через Cbuf.
  *
+ * Ввод текста (консоль, чат, текстовое поле меню — Touch_TextInputActive):
+ * оверлей заменяется экранной клавиатурой (TBF_KEYBOARD) — латиница + цифры
+ * справа, служебный блок (ESC/TAB/BKSP/ENT/курсорные) слева от неё;
+ * клавиша 3x3 мм, масштаб — cvar touch_kbdscale. Символы уходят через
+ * Char_Event (как SDL_TEXTINPUT), служебные — Key_Event down/up.
+ *
  * Мультитач: каждый fingerId захватывается не более чем одним элементом
  * (кнопка / стик / тачпад) и отслеживается до FINGERUP.
  */
@@ -60,6 +66,7 @@
                            (тот же палец крутит обзор, пока кнопка зажата) */
 #define TBF_ATTRACT  16 /* attract-заставка (демо-цикл: лого id и т.п.) —
                            там action-кнопки ролик не пропускают, нужен ESC */
+#define TBF_KEYBOARD 32 /* запрошен ввод текста: вместо кнопок — клавиатура */
 
 typedef struct
 {
@@ -121,6 +128,7 @@ static int touchLayoutH = 0;
 
 static cvar_t *touch_looksens;
 static cvar_t *touch_uiscale;
+static cvar_t *touch_kbdscale;   /* масштаб экранной клавиатуры (конфиги) */
 static float touchLayoutScale = 0.0f;    /* touch_uiscale, под который посчитана раскладка */
 static float touchLayoutFboScale = 0.0f; /* scale FBO, под который посчитана раскладка */
 
@@ -163,6 +171,199 @@ static int Touch_MmToPx(float mm)
 	return (int)(mm * touchMm * Touch_FboScale() + 0.5f);
 }
 
+/* ---- Экранная клавиатура (консоль, чат, текстовые поля меню) -------------
+   Латиница + ряд цифр, прибита к нижней грани экрана справа; ряды
+   центрированы относительно цифрового (самого широкого). Служебный блок
+   (ESC/TAB/BKSP/ENT + курсорные инвертированным T) — левый нижний угол.
+   Клавиша 6x6 мм (cvar touch_kbdscale — масштаб из конфигов). Печатные
+   символы уходят через Char_Event (как SDL_TEXTINPUT), служебные — через
+   Key_Event down/up, т.е. полностью повторяют физическую клавиатуру.
+   Появляется только когда запрошен ввод текста (Touch_TextInputActive). */
+typedef struct
+{
+	int key;              /* text: ASCII для Char_Event; иначе K_* для Key_Event */
+	const char *label;    /* NULL у символьных — подпись берётся из key */
+	bool text;
+	int x, y, w, h;
+	bool pressed;
+	SDL_FingerID fingerId;
+} kbdKey_t;
+
+#define KBD_MAX_KEYS 64
+static kbdKey_t kbdKeys[KBD_MAX_KEYS];
+static int kbdNumKeys = 0;
+static float kbdLayoutScale = 0.0f; /* touch_kbdscale, под который посчитана раскладка */
+
+static void Kbd_AddKey(int key, const char *label, bool text)
+{
+	if (kbdNumKeys >= KBD_MAX_KEYS)
+		return;
+	kbdKeys[kbdNumKeys].key = key;
+	kbdKeys[kbdNumKeys].label = label;
+	kbdKeys[kbdNumKeys].text = text;
+	kbdKeys[kbdNumKeys].pressed = false;
+	kbdKeys[kbdNumKeys].fingerId = 0;
+	kbdNumKeys++;
+}
+
+static void Kbd_Build(void)
+{
+	/* Символьные ряды; латиница + цифры (порядок = порядок на экране). */
+	static const char *rows[] = { "1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm" };
+	kbdNumKeys = 0;
+	for (int r = 0; r < 4; r++)
+		for (const char *c = rows[r]; *c != '\0'; c++)
+			Kbd_AddKey((unsigned char)*c, NULL, true);
+	/* Пробел — широкая клавиша нижнего ряда. */
+	Kbd_AddKey(' ', "SPACE", true);
+	/* Служебный блок (2 колонки x 4 ряда), слева от клавиатуры. */
+	Kbd_AddKey(K_ESCAPE,    "ESC",  false);
+	Kbd_AddKey(K_TAB,       "TAB",  false); /* автодополнение в консоли */
+	Kbd_AddKey(K_BACKSPACE, "BKSP", false);
+	Kbd_AddKey(K_ENTER,     "ENT",  false);
+	Kbd_AddKey(K_UPARROW,   "^",    false);
+	Kbd_AddKey(K_LEFTARROW, "<",    false);
+	Kbd_AddKey(K_DOWNARROW, "v",    false);
+	Kbd_AddKey(K_RIGHTARROW, ">",   false);
+}
+
+/* Раскладка клавиатуры. Геометрия — в пикселях контента (как у кнопок). */
+static void Kbd_Layout(void)
+{
+	float kscale = touch_kbdscale ? touch_kbdscale->value : 1.0f;
+	if (kscale < 0.5f)
+		kscale = 0.5f;
+	if (kscale > 3.0f)
+		kscale = 3.0f;
+
+	int ks = Touch_MmToPx(6.0f * kscale); /* клавиша 6x6 мм */
+	int gap = Touch_MmToPx(0.3f * kscale); /* мелкие зазоры — максимум площади тача */
+	int margin = Touch_MmToPx(1.5f);
+	int marginB = Touch_MmToPx(5.0f); /* отступ всех клавиш/блоков от нижней грани */
+	int cols = 10, rows = 5; /* 4 символьных ряда + ряд с пробелом */
+	int blockW = cols * ks + (cols - 1) * gap;
+	int blockH = rows * ks + (rows - 1) * gap;
+	/* Блок клавиатуры: правая часть экрана, прибит к нижней грани. */
+	int x0 = viddef.width - margin - blockW;
+	int y0 = viddef.height - marginB - blockH;
+
+	int i = 0;
+	/* Символьные ряды 10/10/9/7 — каждый центрирован относительно
+	   цифрового ряда (bounding rect всего блока). */
+	static const int rowLen[] = { 10, 10, 9, 7 };
+	for (int r = 0; r < 4; r++)
+	{
+		int rowW = rowLen[r] * ks + (rowLen[r] - 1) * gap;
+		for (int c = 0; c < rowLen[r]; c++)
+		{
+			kbdKeys[i].x = x0 + (blockW - rowW) / 2 + c * (ks + gap);
+			kbdKeys[i].y = y0 + r * (ks + gap);
+			kbdKeys[i].w = ks;
+			kbdKeys[i].h = ks;
+			i++;
+		}
+	}
+	/* Пробел — нижний ряд, ширина 5 клавиш, тоже по центру блока. */
+	kbdKeys[i].x = x0 + (blockW - (5 * ks + 4 * gap)) / 2;
+	kbdKeys[i].y = y0 + 4 * (ks + gap);
+	kbdKeys[i].w = 5 * ks + 4 * gap;
+	kbdKeys[i].h = ks;
+	i++;
+
+	/* Служебный блок — левый нижний угол; курсорные — привычным
+	   инвертированным T (вверх над тройкой влево/вниз/вправо):
+	     ESC TAB BKSP ENT
+	          ^
+	     <   v   >
+	   Клавиши блока 7 мм; ESC/TAB/BKSP/ENT шире — 8 мм; отступ слева —
+	   в ширину клавиши блока. Стрелки центрированы в своих колонках. */
+	int sks = Touch_MmToPx(7.0f * kscale); /* высота клавиш блока */
+	int sw = Touch_MmToPx(8.0f * kscale);  /* ширина ESC/TAB/BKSP/ENT */
+	static const int svcPos[8][2] = {
+		{0, 0}, {1, 0}, {2, 0}, {3, 0}, /* ESC TAB BKSP ENT */
+		{1, 1},                         /* ^ */
+		{0, 2}, {1, 2}, {2, 2}          /* < v > */
+	};
+	int sx = sks;
+	int sy = viddef.height - marginB - (3 * sks + 2 * gap);
+	for (int k = 0; k < 8 && i < kbdNumKeys; k++, i++)
+	{
+		int kw = (svcPos[k][1] == 0) ? sw : sks;
+		kbdKeys[i].x = sx + svcPos[k][0] * (sw + gap) + (sw - kw) / 2;
+		kbdKeys[i].y = sy + svcPos[k][1] * (sks + gap);
+		kbdKeys[i].w = kw;
+		kbdKeys[i].h = sks;
+	}
+}
+
+static kbdKey_t *Kbd_HitTest(int x, int y)
+{
+	for (int i = 0; i < kbdNumKeys; i++)
+	{
+		kbdKey_t *k = &kbdKeys[i];
+		if (x >= k->x && x < k->x + k->w && y >= k->y && y < k->y + k->h)
+			return k;
+	}
+	return NULL;
+}
+
+static void Kbd_ReleaseKey(kbdKey_t *k)
+{
+	if (!k->pressed)
+		return;
+	k->pressed = false;
+	if (!k->text)
+		Key_Event(k->key, false);
+}
+
+static void Kbd_FingerEvent(int sdlEventType, long long fingerId, int x, int y)
+{
+	if (sdlEventType == SDL_FINGERDOWN)
+	{
+		kbdKey_t *k = Kbd_HitTest(x, y);
+		if (k != NULL && !k->pressed)
+		{
+			k->pressed = true;
+			k->fingerId = fingerId;
+			/* Печатный символ — как SDL_TEXTINPUT (Char_Event), служебная —
+			   как физическая клавиша (Key_Event down, up на отпускании). */
+			if (k->text)
+				Char_Event(k->key, false);
+			else
+				Key_Event(k->key, true);
+		}
+	}
+	else if (sdlEventType == SDL_FINGERUP)
+	{
+		for (int i = 0; i < kbdNumKeys; i++)
+			if (kbdKeys[i].pressed && kbdKeys[i].fingerId == fingerId)
+				Kbd_ReleaseKey(&kbdKeys[i]);
+	}
+	/* MOTION игнорируется — как у кнопок: клавиша «залипает» за пальцем. */
+}
+
+static void Kbd_ReleaseAll(void)
+{
+	for (int i = 0; i < kbdNumKeys; i++)
+		Kbd_ReleaseKey(&kbdKeys[i]);
+}
+
+/* Запрошен ли сейчас ввод текста (показывать клавиатуру). */
+static bool Touch_TextInputActive(void)
+{
+	if (cls.key_dest == key_console)
+		return true;
+	if (cls.key_dest == key_message) /* чат сетевой игры */
+		return true;
+	if (cls.key_dest == key_menu)
+		return M_CursorOnTextField() != 0;
+	/* Консоль реально открыта, хотя key_dest == key_game (не подключены). */
+	if (cls.key_dest == key_game &&
+	    (cls.state == ca_disconnected || cls.state == ca_connecting))
+		return true;
+	return false;
+}
+
 static void Touch_Layout(void)
 {
 	float uscale = touch_uiscale ? touch_uiscale->value : 1.0f;
@@ -171,15 +372,20 @@ static void Touch_Layout(void)
 	if (uscale > 3.0f)
 		uscale = 3.0f;
 
+	float kscale = touch_kbdscale ? touch_kbdscale->value : 1.0f;
 	float fboScale = Touch_FboScale();
 	if (viddef.width == touchLayoutW && viddef.height == touchLayoutH &&
-	    uscale == touchLayoutScale && fboScale == touchLayoutFboScale)
+	    uscale == touchLayoutScale && kscale == kbdLayoutScale &&
+	    fboScale == touchLayoutFboScale)
 		return;
 
 	touchLayoutW = viddef.width;
 	touchLayoutH = viddef.height;
 	touchLayoutScale = uscale;
+	kbdLayoutScale = kscale;
 	touchLayoutFboScale = fboScale;
+
+	Kbd_Layout();
 
 	int size = Touch_MmToPx(13.0f * uscale);
 	int smallSize = size * 0.7;
@@ -324,7 +530,10 @@ void Touch_Init(void)
 
 	touch_looksens = Cvar_Get("touch_looksens", "1.0", CVAR_ARCHIVE);
 	touch_uiscale = Cvar_Get("touch_uiscale", "1.0", CVAR_ARCHIVE);
+	touch_kbdscale = Cvar_Get("touch_kbdscale", "1.0", CVAR_ARCHIVE);
 	Cmd_AddCommand("touchbtn", Touch_BtnCmd);
+
+	Kbd_Build();
 
 	touchLayoutW = touchLayoutH = 0;
 	touchLayoutScale = 0.0f;
@@ -338,6 +547,10 @@ void Touch_Init(void)
 /* Текущий контекст экрана. */
 static int Touch_Context(void)
 {
+	/* Запрошен ввод текста — клавиатура заменяет оверлей (у неё есть
+	   свои ESC/стрелки/TAB). */
+	if (Touch_TextInputActive())
+		return TBF_KEYBOARD;
 	if (cls.key_dest == key_menu)
 		return TBF_MENU;
 	if (cls.key_dest == key_game)
@@ -427,6 +640,13 @@ void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y)
 {
 	Touch_Layout();
 	int context = Touch_Context();
+
+	/* Клавиатура — отдельный хит-тест/трекинг клавиш. */
+	if (context == TBF_KEYBOARD)
+	{
+		Kbd_FingerEvent(sdlEventType, fingerId, (int)x, (int)y);
+		return;
+	}
 
 	if (sdlEventType == SDL_FINGERDOWN)
 	{
@@ -536,6 +756,10 @@ void Touch_Frame(void)
 		if (touchButtons[i].pressed && !Touch_ButtonVisible(&touchButtons[i], context))
 			Touch_Release(&touchButtons[i]);
 	}
+
+	/* Ввод текста кончился с зажатой клавишей — отпустить. */
+	if (context != TBF_KEYBOARD)
+		Kbd_ReleaseAll();
 }
 
 /* Залитый круг горизонтальными полосами (оверлейные Draw_FillAlpha). */
@@ -593,9 +817,9 @@ static void Touch_DrawButton(const touchButton_t *b)
 	}
 
 	if (b->pressed)
-		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.9f, 0.9f, 0.9f, 0.4f);
+		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.9f, 0.9f, 0.9f, 0.55f);
 	else
-		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.1f, 0.1f, 0.1f, 0.15f);
+		Draw_FillAlpha(b->x, b->y, b->w, b->h, 0.06f, 0.06f, 0.08f, 0.55f);
 
 	if (b->icon != NULL)
 	{
@@ -625,6 +849,39 @@ static void Touch_DrawButton(const touchButton_t *b)
 	Draw_CharEnd();
 }
 
+/* Отрисовка экранной клавиатуры (imgui; легаси-фолбэк — Draw_FillAlpha). */
+static void Kbd_Draw(void)
+{
+	for (int i = 0; i < kbdNumKeys; i++)
+	{
+		kbdKey_t *k = &kbdKeys[i];
+		char chLabel[2] = { (char)k->key, '\0' };
+		const char *label = k->label != NULL ? k->label : chLabel;
+
+		if (l_imgui)
+		{
+			AuroraImgui_Button((float)k->x, (float)k->y, (float)k->w, (float)k->h,
+				label, k->pressed);
+			continue;
+		}
+
+		if (k->pressed)
+			Draw_FillAlpha(k->x, k->y, k->w, k->h, 0.9f, 0.9f, 0.9f, 0.55f);
+		else
+			Draw_FillAlpha(k->x, k->y, k->w, k->h, 0.06f, 0.06f, 0.08f, 0.55f);
+
+		float scale = k->h / 8.0f * 0.6f;
+		if (scale < 1.0f)
+			scale = 1.0f;
+		int labelW = (int)(Q_strlen(label) * 8 * scale);
+		Draw_CharBegin();
+		for (int j = 0; label[j] != '\0'; j++)
+			Draw_CharScaled(k->x + (k->w - labelW) / 2 + (int)(j * 8 * scale),
+				k->y + (k->h - (int)(8 * scale)) / 2, label[j], scale);
+		Draw_CharEnd();
+	}
+}
+
 void Touch_DrawOverlay(void)
 {
 	int context = Touch_Context();
@@ -637,25 +894,32 @@ void Touch_DrawOverlay(void)
 	if (l_imgui)
 		AuroraImgui_NewFrame(viddef.width, viddef.height);
 
-	for (int i = 0; i < (int)TOUCH_NUM_BUTTONS; i++)
+	if (context == TBF_KEYBOARD)
 	{
-		touchButton_t *b = &touchButtons[i];
-		if (Touch_ButtonVisible(b, context))
-			Touch_DrawButton(b);
+		Kbd_Draw();
 	}
-
-	/* Плавающий стик: база + ручка. */
-	if (stickActive && context == TBF_GAME)
+	else
 	{
-		if (l_imgui)
+		for (int i = 0; i < (int)TOUCH_NUM_BUTTONS; i++)
 		{
-			AuroraImgui_StickCircle((float)stickBaseX, (float)stickBaseY, (float)stickBaseR, false);
-			AuroraImgui_StickCircle((float)stickKnobX, (float)stickKnobY, (float)stickKnobR, true);
+			touchButton_t *b = &touchButtons[i];
+			if (Touch_ButtonVisible(b, context))
+				Touch_DrawButton(b);
 		}
-		else
+
+		/* Плавающий стик: база + ручка. */
+		if (stickActive && context == TBF_GAME)
 		{
-			Touch_FillCircle(stickBaseX, stickBaseY, stickBaseR, 0.1f, 0.1f, 0.1f, 0.35f);
-			Touch_FillCircle(stickKnobX, stickKnobY, stickKnobR, 0.9f, 0.9f, 0.9f, 0.5f);
+			if (l_imgui)
+			{
+				AuroraImgui_StickCircle((float)stickBaseX, (float)stickBaseY, (float)stickBaseR, false);
+				AuroraImgui_StickCircle((float)stickKnobX, (float)stickKnobY, (float)stickKnobR, true);
+			}
+			else
+			{
+				Touch_FillCircle(stickBaseX, stickBaseY, stickBaseR, 0.1f, 0.1f, 0.1f, 0.35f);
+				Touch_FillCircle(stickKnobX, stickKnobY, stickKnobR, 0.9f, 0.9f, 0.9f, 0.5f);
+			}
 		}
 	}
 
