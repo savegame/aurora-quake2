@@ -225,8 +225,8 @@ static void Touch_Layout(void)
 	/* Игра, правая сторона: FIRE по центру, JUMP выше, DUCK ниже. */
 	touchButtons[TB_FIRE].x = viddef.width - margin * 2 - size - sizeBig;
 	touchButtons[TB_FIRE].y = cy - sizeBig / 2 - gap * 2;
-	touchButtons[TB_CROUCH].x = viddef.width - margin - size;
-	touchButtons[TB_CROUCH].y = viddef.height - margin - size - gap;
+	touchButtons[TB_CROUCH].x = viddef.width - gap - size;
+	touchButtons[TB_CROUCH].y = viddef.height - gap - size;
 	touchButtons[TB_JUMP].x = touchButtons[TB_CROUCH].x;
 	touchButtons[TB_JUMP].y = touchButtons[TB_CROUCH].y - gap - size;
 
