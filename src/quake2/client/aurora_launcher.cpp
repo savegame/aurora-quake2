@@ -424,14 +424,42 @@ void DrawDirectoryBrowser( int win_w, int win_h )
 
 	ImGui::Separator();
 
-	/* Подкаталоги — крупными кнопками, список прокручивается. */
+	/* Подкаталоги — плоским списком (визуально НЕ кнопки): Selectable без
+	   фона, текст выровнен влево, перед именем маркер "[  ]" (эмодзи в
+	   шрифте нет — диапазоны глифов их не включают). Первым пунктом всегда
+	   "[  ] .." — выход на уровень вверх. Каждый пункт отодвинут от краёв
+	   scroll view на 3 мм слева и справа (шрифт лаунчера = 4.5 мм, считаем
+	   от реального размера шрифта, без ужатия ES). */
+	const float pad_x  = ImGui::GetFontSize() * ( 3.f / 4.5f );
+	const float item_h = row_h * 0.9f;
 	ImGui::BeginChild( "##dir_list", ImVec2( 0, 0 ), false,
 		ImGuiWindowFlags_AlwaysVerticalScrollbar );
+
+	/* Подсветка пункта — только пока палец на экране. После FINGERUP
+	   синтетическая мышь остаётся в точке тапа, и пункт с тем же индексом
+	   в новом списке остаётся "hovered" — без касания гасим hover/active. */
+	const bool highlight = g_touch.active;
+	if( !highlight )
+	{
+		ImGui::PushStyleColor( ImGuiCol_HeaderHovered, ImVec4( 0, 0, 0, 0 ));
+		ImGui::PushStyleColor( ImGuiCol_HeaderActive,  ImVec4( 0, 0, 0, 0 ));
+	}
+
+	auto drawItem = [&]( const char *label ) -> bool
+	{
+		ImGui::SetCursorPosX( ImGui::GetCursorPosX() + pad_x );
+		return ImGui::Selectable( label, false, 0,
+			ImVec2( ImGui::GetContentRegionAvail().x - pad_x, item_h ));
+	};
+
+	if( drawItem( "[  ] .." ))
+		g_picker.current_dir = ParentOf( g_picker.current_dir );
 
 	auto subs = ListSubdirs( g_picker.current_dir );
 	for( const auto &name : subs )
 	{
-		if( ImGui::Button( name.c_str(), ImVec2( -1, row_h * 0.9 )))
+		std::string label = "[  ] " + name;
+		if( drawItem( label.c_str()))
 		{
 			std::string next = g_picker.current_dir;
 			if( next != "/" ) next += "/";
@@ -439,6 +467,9 @@ void DrawDirectoryBrowser( int win_w, int win_h )
 			g_picker.current_dir = next;
 		}
 	}
+
+	if( !highlight )
+		ImGui::PopStyleColor( 2 );
 
 	ImGui::EndChild();
 
