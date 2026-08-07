@@ -15,8 +15,9 @@
  * - правая половина — тачпад осмотра, дельты уходят в IN_AddTouchLook
  *   (тот же путь, что и мышь);
  * - кнопки действий привязаны к РЕАЛЬНЫМ action'ам движка (консольные
- *   команды +attack/+moveup/+movedown, inv- и weap-команды, "cmd help"
- *   через Cbuf), а не к эмуляции клавиш — не ломаются при перебиндинге;
+ *   команды +attack/+moveup/+movedown, inv- и weap-команды, save/load quick,
+ *   "cmd help" через Cbuf), а не к эмуляции клавиш — не ломаются при
+ *   перебиндинге;
  * - кнопки «залипают» за fingerId: палец можно увести с области кнопки,
  *   отпускание — только по FINGERUP этого пальца; FIRE/JUMP (флаг
  *   TBF_LOOK) одновременно захватывают тачпад осмотра — зажатый выстрел/
@@ -93,11 +94,14 @@ static touchButton_t touchButtons[] =
 	{ TB_KEYCMD,    "+attack\n",   "-attack\n",    "FIRE", NULL, 0,0,0,0, TBF_GAME | TBF_LOOK, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "+moveup\n",   "-moveup\n",    "JUMP", NULL, 0,0,0,0, TBF_GAME | TBF_LOOK, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "+movedown\n", "-movedown\n",  "DUCK", NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
-	{ TB_KEYCMD,    "invprev\n",   NULL,           "IT<",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
+	{ TB_KEYCMD,    "invprev\n",   NULL,           "<IT",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "invuse\n",    NULL,           "USE",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "invnext\n",   NULL,           "IT>",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "weapprev\n",  NULL,           "WP<",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
 	{ TB_KEYCMD,    "weapnext\n",  NULL,           "WP>",  NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
+	/* Быстрое сохранение/загрузка (слот "quick", команды save/load движка). */
+	{ TB_KEYCMD,    "save quick\n", NULL,          "SAVE", NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
+	{ TB_KEYCMD,    "load quick\n", NULL,          "LOAD", NULL, 0,0,0,0, TBF_GAME, 0,0,0,0, false, 0 },
 };
 #define TOUCH_NUM_BUTTONS (sizeof(touchButtons) / sizeof(touchButtons[0]))
 
@@ -107,7 +111,8 @@ enum
 	TB_SKIP,
 	TB_HELP, TB_FIRE, TB_JUMP, TB_CROUCH,
 	TB_ITEM_PREV, TB_ITEM_USE, TB_ITEM_NEXT,
-	TB_WEAP_PREV, TB_WEAP_NEXT
+	TB_WEAP_PREV, TB_WEAP_NEXT,
+	TB_QUICKSAVE, TB_QUICKLOAD
 };
 
 static int touchMm;          /* экранных пикселей в миллиметре (от DPI дисплея) */
@@ -177,6 +182,7 @@ static void Touch_Layout(void)
 	touchLayoutFboScale = fboScale;
 
 	int size = Touch_MmToPx(13.0f * uscale);
+	int smallSize = size * 0.7;
 	int sizeBig = Touch_MmToPx(16.0f * uscale);
 	int gap = Touch_MmToPx(4.0f * uscale);
 	int margin = Touch_MmToPx(5.0f);
@@ -217,12 +223,12 @@ static void Touch_Layout(void)
 	touchButtons[TB_RIGHT].y = touchButtons[TB_LEFT].y;
 
 	/* Игра, правая сторона: FIRE по центру, JUMP выше, DUCK ниже. */
-	touchButtons[TB_FIRE].x = viddef.width - margin - sizeBig;
-	touchButtons[TB_FIRE].y = cy - sizeBig / 2;
-	touchButtons[TB_JUMP].x = viddef.width - margin - size;
-	touchButtons[TB_JUMP].y = touchButtons[TB_FIRE].y - gap - size;
-	touchButtons[TB_CROUCH].x = touchButtons[TB_JUMP].x;
-	touchButtons[TB_CROUCH].y = touchButtons[TB_FIRE].y + sizeBig + gap;
+	touchButtons[TB_FIRE].x = viddef.width - margin * 2 - size - sizeBig;
+	touchButtons[TB_FIRE].y = cy - sizeBig / 2 - gap * 2;
+	touchButtons[TB_CROUCH].x = viddef.width - margin - size;
+	touchButtons[TB_CROUCH].y = viddef.height - margin - size - gap;
+	touchButtons[TB_JUMP].x = touchButtons[TB_CROUCH].x;
+	touchButtons[TB_JUMP].y = touchButtons[TB_CROUCH].y - gap - size;
 
 	/* Игра, верхняя середина: prev/use/next item. */
 	touchButtons[TB_ITEM_USE].x = cx - size / 2;
@@ -235,16 +241,33 @@ static void Touch_Layout(void)
 	/* Игра, нижняя середина: prev/next weapon; между ними промежуток,
 	   чтобы была видна иконка текущего оружия из игрового UI. */
 	int weapGap = size * 2;
-	touchButtons[TB_WEAP_PREV].x = cx - weapGap / 2 - size;
-	touchButtons[TB_WEAP_PREV].y = viddef.height - marginV - size;
+	touchButtons[TB_WEAP_PREV].x = cx - weapGap / 2 - smallSize;
+	touchButtons[TB_WEAP_PREV].y = viddef.height - marginV - smallSize;
 	touchButtons[TB_WEAP_NEXT].x = cx + weapGap / 2;
 	touchButtons[TB_WEAP_NEXT].y = touchButtons[TB_WEAP_PREV].y;
+
+	/* Игра, правый верхний угол: быстрое сохранение/загрузка. */
+	touchButtons[TB_QUICKLOAD].x = viddef.width - margin - size;
+	touchButtons[TB_QUICKLOAD].y = marginV;
+	touchButtons[TB_QUICKSAVE].x = touchButtons[TB_QUICKLOAD].x - gap - size;
+	touchButtons[TB_QUICKSAVE].y = marginV;
 
 	for (int i = 0; i < (int)TOUCH_NUM_BUTTONS; i++)
 	{
 		touchButtons[i].w = size;
 		touchButtons[i].h = size;
 	}
+
+	// small buttons
+	touchButtons[TB_ITEM_USE].h  = smallSize;
+	touchButtons[TB_ITEM_PREV].h = smallSize;
+	touchButtons[TB_ITEM_NEXT].h = smallSize;
+	touchButtons[TB_WEAP_PREV].h = smallSize;
+	touchButtons[TB_WEAP_NEXT].h = smallSize;
+	touchButtons[TB_QUICKSAVE].h = smallSize;
+	touchButtons[TB_QUICKLOAD].h = smallSize;
+	
+	// big button
 	touchButtons[TB_FIRE].w = sizeBig;
 	touchButtons[TB_FIRE].h = sizeBig;
 
