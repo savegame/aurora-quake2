@@ -702,7 +702,12 @@ void V_Init()
 	Cmd_AddCommand("viewpos", V_Viewpos_f);
 
 	crosshair = Cvar_Get("crosshair", "0", CVAR_ARCHIVE);
+#if defined(AURORA_OS)
+	/* Как и остальные *scale на Авроре — по умолчанию 6x (см. cl_screen.c). */
+	crosshair_scale = Cvar_Get("crosshair_scale", "6", CVAR_ARCHIVE);
+#else
 	crosshair_scale = Cvar_Get("crosshair_scale", "-1", CVAR_ARCHIVE);
+#endif
 	cl_testblend = Cvar_Get("cl_testblend", "0", 0);
 	cl_testparticles = Cvar_Get("cl_testparticles", "0", 0);
 	cl_testentities = Cvar_Get("cl_testentities", "0", 0);

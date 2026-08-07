@@ -389,9 +389,17 @@ void SCR_Init()
 	scr_graphscale = Cvar_Get("graphscale", "1", 0);
 	scr_graphshift = Cvar_Get("graphshift", "0", 0);
 	scr_drawall = Cvar_Get("scr_drawall", "0", 0);
+#if defined(AURORA_OS)
+	/* На мобильном экране Авроры авто-масштаб слишком мелкий — по умолчанию
+	   максимальный из меню (6x); фактический клампит SCR_ClampScale. */
+	gl_hudscale = Cvar_Get("gl_hudscale", "6", CVAR_ARCHIVE);
+	gl_consolescale = Cvar_Get("gl_consolescale", "6", CVAR_ARCHIVE);
+	gl_menuscale = Cvar_Get("gl_menuscale", "6", CVAR_ARCHIVE);
+#else
 	gl_hudscale = Cvar_Get("gl_hudscale", "-1", CVAR_ARCHIVE);
 	gl_consolescale = Cvar_Get("gl_consolescale", "-1", CVAR_ARCHIVE);
 	gl_menuscale = Cvar_Get("gl_menuscale", "-1", CVAR_ARCHIVE);
+#endif
 
 	/* register our commands */
 	Cmd_AddCommand("timerefresh", SCR_TimeRefresh_f);
