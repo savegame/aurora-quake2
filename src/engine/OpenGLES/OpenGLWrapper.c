@@ -850,10 +850,11 @@ void oglwEnableSmoothShading(bool flag) {
 void oglwSetCurrentTextureUnitForced(int unit) {
     OpenGLWrapper *oglw = l_openGLWrapper;
     oglw->textureUnitRequested=unit;
-    if (oglw->textureUnit!=unit) {
-        oglw->textureUnit=unit;
-        glActiveTexture(GL_TEXTURE0 + unit);
-    }
+    /* Безусловно: реальный GL мог рассинхронизироваться с кэшем из-за сырых
+       биндингов сторонних актёров (FBO-блит, imgui, лаунчер). Cache-check
+       здесь превращал «forced» в no-op именно тогда, когда он нужен. */
+    oglw->textureUnit=unit;
+    glActiveTexture(GL_TEXTURE0 + unit);
 }
 
 void oglwSetCurrentTextureUnit(int unit) {
@@ -863,18 +864,19 @@ void oglwSetCurrentTextureUnit(int unit) {
  
 void oglwBindTextureForced(int unit, GLuint texture) {
     OpenGLWrapper *oglw = l_openGLWrapper;
-    if (oglw->textureUnit != unit) {
-        oglw->textureUnit = unit;
-        glActiveTexture(GL_TEXTURE0 + unit);
-    }
+    /* Безусловные glActiveTexture/glBindTexture: реальный GL мог
+       рассинхронизироваться с кэшем из-за сырых биндингов сторонних актёров
+       (FBO-блит биндит colorTex сырьём, imgui, лаунчер). Иначе следующий
+       glTexImage2D (например кадр RoQ в Draw_StretchRaw) уезжает в чужую
+       текстуру — в colorTex FBO, что убивает весь кадр. */
+    oglw->textureUnit = unit;
+    glActiveTexture(GL_TEXTURE0 + unit);
 
     OpenGLWrapperTextureUnit *tu = &oglw->textureUnits[unit];
     tu->textureRequested = texture;
-    if (tu->texture != texture) {
-        tu->texture = texture;
-        glBindTexture(GL_TEXTURE_2D, texture);
-    }
-    
+    tu->texture = texture;
+    glBindTexture(GL_TEXTURE_2D, texture);
+
     unit = oglw->textureUnitRequested;
     if (oglw->textureUnit != unit) {
         oglw->textureUnit = unit;

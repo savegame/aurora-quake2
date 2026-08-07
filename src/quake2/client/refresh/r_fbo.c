@@ -149,7 +149,9 @@ static bool RFBO_CreateTargets(int w, int h)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-	glBindTexture(GL_TEXTURE_2D, 0);
+	/* Анбинд — forced через wrapper, чтобы его кэш биндингов не расходился
+	   с реальным состоянием (см. комментарий в RFBO_DrawToScreen). */
+	oglwBindTextureForced(0, 0);
 
 	glGenRenderbuffers(1, &l_fbo.depthStencilRb);
 	glBindRenderbuffer(GL_RENDERBUFFER, l_fbo.depthStencilRb);
@@ -351,8 +353,14 @@ void RFBO_DrawToScreen(void)
 
 	/* Восстановление состояния wrapper'а: его программа (glUseProgram
 	   wrapper не выставляет на каждый draw), текстура 0, blend обратно
-	   во включённое (кэш 2D ROP на конец кадра: blending on, depth off). */
-	glBindTexture(GL_TEXTURE_2D, 0);
+	   во включённое (кэш 2D ROP на конец кадра: blending on, depth off).
+	   Юнит и бинд — через forced-вызовы wrapper'а, НЕ сырым GL: иначе
+	   кэш биндингов wrapper'а расходится с реальностью (реально bound 0,
+	   в кэше — например conchars), и на чисто-текстовых экранах меню
+	   (Start Server и др. до загрузки 3D) cache-hit не выполняет реальный
+	   бинд — буквы сэмплируются из текстуры 0 (замороженный кадр заставки). */
+	oglwSetCurrentTextureUnitForced(0);
+	oglwBindTextureForced(0, 0);
 	glUseProgram(oglwGetProgram());
 	glEnable(GL_BLEND);
 }
