@@ -2419,7 +2419,10 @@ static void R_Beam_draw(entity_t *e)
 		VectorAdd(start_points[i], direction, end_points[i]);
 	}
 
-    int alpha = 1.0f;
+    /* Баг апстрима: было `int alpha` — e->alpha (0.30f у beams с
+       RF_TRANSLUCENT) усекалась до 0, вершины получали нулевую альфу и
+       лучи/силовые поля (target_laser, TE_LIGHTNING) были невидимы. */
+    float alpha = 1.0f;
 	if (e->flags & RF_TRANSLUCENT)
 		alpha = e->alpha;
 	if (alpha < 1.0f)
