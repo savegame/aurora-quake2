@@ -214,6 +214,43 @@ static DISPMANX_ELEMENT_HANDLE_T dispman_element;
 static EGL_DISPMANX_WINDOW_T l_dispmanWindow;
 #endif
 
+#if defined(AURORA_OS)
+#include <dlfcn.h>
+/* Mali-wayland (DRM-устройства Авроры): SDL для SDL_WINDOW_OPENGL-окна уже
+   создаёт СВОЙ EGLSurface на своём wl_egl_window (SDL_waylandwindow.c), а вторая
+   eglCreateWindowSurface на том же native window по спеке EGL даёт EGL_BAD_ALLOC.
+   libhybris (hwcomposer-устройства) это терпел, Mali — нет. Поэтому создаём
+   СОБСТВЕННЫЙ wl_egl_window на той же wl_surface. Символы тянем dlopen'ом,
+   как это делает сам SDL (заголовков wayland-egl в sysroot может не быть).
+   На каждый вызов — новый wl_egl_window: eglwInitialize под Авророй не
+   разрушает старый EGLSurface (libhybris падал, см. eglwFinalize), а повторное
+   создание surface на том же wl_egl_window дало бы тот же EGL_BAD_ALLOC. */
+struct wl_egl_window;
+typedef struct wl_egl_window *(*EglwWlEglWindowCreateFn)(struct wl_surface *, int, int);
+
+static EGLNativeWindowType eglwAuroraCreateEglWindow(struct wl_surface *surface)
+{
+    static EglwWlEglWindowCreateFn createFn = NULL;
+    static int loadTried = 0;
+    if (!loadTried)
+    {
+        loadTried = 1;
+        void *handle = dlopen("libwayland-egl.so.1", RTLD_LAZY | RTLD_GLOBAL);
+        if (handle != NULL)
+            createFn = (EglwWlEglWindowCreateFn)dlsym(handle, "wl_egl_window_create");
+    }
+    if (createFn == NULL || surface == NULL)
+        return (EGLNativeWindowType)NULL;
+
+    int w = 0, h = 0;
+    SDL_GL_GetDrawableSize(sdlwContext->window, &w, &h);
+    if (w <= 0 || h <= 0)
+        SDL_GetWindowSize(sdlwContext->window, &w, &h);
+    printf("eglw: own wl_egl_window %dx%d (Mali-wayland EGL_BAD_ALLOC workaround)\n", w, h);
+    return (EGLNativeWindowType)createFn(surface, w, h);
+}
+#endif /* AURORA_OS */
+
 static EGLNativeWindowType eglwGetNativeWindow()
 {
     EGLNativeWindowType nativeWindow = NULL;
@@ -315,8 +352,13 @@ static EGLNativeWindowType eglwGetNativeWindow()
     {
         #if defined(SDL_VIDEO_DRIVER_WAYLAND)
         if (wmInfo.subsystem == SDL_SYSWM_WAYLAND) {
+            #if defined(AURORA_OS)
+            // Wayland: свой wl_egl_window (см. eglwAuroraCreateEglWindow).
+            nativeWindow = eglwAuroraCreateEglWindow(wmInfo.info.wl.surface);
+            #else
             // Wayland: SDL creates wl_egl_window for SDL_WINDOW_OPENGL windows.
             nativeWindow = wmInfo.info.wl.egl_window;
+            #endif
         }
         #endif
         #if defined(SDL_VIDEO_DRIVER_X11)
