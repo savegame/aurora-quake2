@@ -174,6 +174,22 @@ list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_imgui.cpp)
 # In-process лаунчер на ImGui (выбор ресурсов/настройки до старта движка).
 list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_launcher.cpp)
 
+# Запрет гашения экрана через MCE (D-Bus) — только для сборки на устройство
+# (BUNDLE_SDL2=ON). aurora_keepalive.c попадает в glob выше и без dbus-1
+# собирается в заглушки, так что host-сборка не зависит от D-Bus/MCE.
+if(BUNDLE_SDL2)
+    pkg_check_modules(DBUS dbus-1 IMPORTED_TARGET)
+    if(DBUS_FOUND)
+        add_compile_definitions(AURORA_MCE_KEEPALIVE)
+    else()
+        message(WARNING "dbus-1 не найден: запрет гашения экрана (MCE) отключён")
+    endif()
+    # Автопауза при сворачивании (фокус теряется через xdg_toplevel ACTIVATED —
+    # патч libsdl wayland-бэкенда; на host используется системный SDL2, где
+    # этого патча нет и поведение сворачивания менять нельзя).
+    add_compile_definitions(AURORA_PAUSE_IN_BACKGROUND)
+endif()
+
 add_executable(quake2 ${QUAKE2_SOURCES})
 
 # В проекте есть C++ (imgui) — линкуем C++-линкером (libstdc++).
@@ -191,6 +207,7 @@ target_link_libraries(quake2
     ${GLESV2_LIBRARIES}
     ${EGL_LIBRARIES}
     ${WAYLAND_CLIENT_LIBRARIES}
+    $<$<TARGET_EXISTS:PkgConfig::DBUS>:PkgConfig::DBUS>
     zlib_quake2
     imgui
     m

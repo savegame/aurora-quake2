@@ -33,6 +33,9 @@
 #include "client/aurora_launcher.h"
 #endif
 
+/* Заголовок платформенно-нейтральный: на host-сборке внутри заглушки. */
+#include "client/aurora_keepalive.h"
+
 #include <setjmp.h>
 
 FILE *log_stats_file;
@@ -487,6 +490,9 @@ void Qcommon_Run(int argc, char **argv)
 
 	int oldtime = Sys_Milliseconds();
 
+	/* Запрет гашения экрана (Аврора/MCE; на других платформах — заглушка). */
+	Aurora_KeepaliveInit();
+
 	/* The legendary Quake II mainloop */
 	while (1)
 	{
@@ -504,5 +510,8 @@ void Qcommon_Run(int argc, char **argv)
 
 		Qcommon_Frame(time);
 		oldtime = newtime;
+
+		/* Периодический keepalive против гашения экрана. */
+		Aurora_KeepaliveFrame();
 	}
 }

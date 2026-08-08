@@ -10,6 +10,12 @@
 #include "client/cl_touch.h"
 #endif
 
+#if defined(AURORA_PAUSE_IN_BACKGROUND)
+#include "client/aurora_keepalive.h"
+/* Пауза выставлена автоматически при сворачивании (не пользователем). */
+static bool pause_by_focus = false;
+#endif
+
 #include "SDL/SDLWrapper.h"
 
 #include <SDL2/SDL.h>
@@ -335,7 +341,32 @@ bool IN_processEvent(SDL_Event *event)
 			break;
 		case SDL_WINDOWEVENT_FOCUS_LOST:
 			Key_MarkAllUp();
+#if defined(AURORA_PAUSE_IN_BACKGROUND)
+			/* Сворачивание (lipstick шлёт xdg_toplevel configure без
+			   ACTIVATED → SDL_WINDOWEVENT_FOCUS_LOST, см. патч
+			   SDL_waylandwindow.c): ставим игру на паузу и отпускаем
+			   запрет гашения экрана. Паузу, выставленную пользователем
+			   вручную, не трогаем (CL_Pause сам откажет в мультиплеере). */
+			if (!cl_paused->value)
+			{
+				CL_Pause(true);
+				pause_by_focus = true;
+			}
+			Aurora_KeepaliveSetActive(false);
+#endif
 			break;
+#if defined(AURORA_PAUSE_IN_BACKGROUND)
+		case SDL_WINDOWEVENT_FOCUS_GAINED:
+			/* Разворачивание: снимаем только нашу автопаузу и
+			   возобновляем keepalive против гашения экрана. */
+			if (pause_by_focus)
+			{
+				pause_by_focus = false;
+				CL_Pause(false);
+			}
+			Aurora_KeepaliveSetActive(true);
+			break;
+#endif
 		}
 		break;
 
