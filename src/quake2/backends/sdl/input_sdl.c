@@ -339,6 +339,21 @@ bool IN_processEvent(SDL_Event *event)
 		case SDL_WINDOWEVENT_RESIZED:
 //        case SDL_WINDOWEVENT_SIZE_CHANGED:
 			break;
+#if defined(AURORA_FBO)
+		case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+		case SDL_WINDOWEVENT_MOVED:
+			/* Перенос окна на другой дисплей (внешний экран): тип панели
+			   мог смениться (портретная ↔ ландшафтная) — пересчитываем
+			   transform по НОВОМУ дисплею (SDL_GetWindowDisplayIndex внутри).
+			   DISPLAY_CHANGED приходит именно при смене дисплея; MOVED — как
+			   фолбэк (R_AuroraUpdateTransform идемпотентен и дёшев: несколько
+			   кэшированных SDL-запросов + wl_surface_set_buffer_transform).
+			   Ресайз окна отдельно не обрабатываем: R_Window_update каждый
+			   кадр (из R_checkChanges) читает SDL_GetWindowSize и дёргает
+			   RFBO_Resize; wl_egl_window ресайзит сам SDL по configure. */
+			R_AuroraUpdateTransform();
+			break;
+#endif
 		case SDL_WINDOWEVENT_FOCUS_LOST:
 			Key_MarkAllUp();
 #if defined(AURORA_PAUSE_IN_BACKGROUND)

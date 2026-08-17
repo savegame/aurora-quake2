@@ -50,6 +50,7 @@
 
 #include "backends/input.h"
 #include "aurora_imgui.h"
+#include "SDL/SDLWrapper.h"
 
 #if defined(AURORA_FBO)
 #include "refresh/r_fbo.h"
@@ -519,14 +520,35 @@ static void Touch_BtnCmd(void)
 	Com_Printf("touchbtn: кнопка '%s' не найдена\n", label);
 }
 
-void Touch_Init(void)
+void Touch_RefreshDpi(void)
 {
 	float ddpi = 0.0f;
-	if (SDL_GetDisplayDPI(0, &ddpi, NULL, NULL) != 0 || ddpi <= 0.0f)
+	/* DPI — по дисплею, на котором реально находится окно (перенос на
+	   внешний экран), а не захардкоженный дисплей 0. */
+	int displayIndex = 0;
+	if (sdlwContext != NULL && sdlwContext->window != NULL)
+	{
+		displayIndex = SDL_GetWindowDisplayIndex(sdlwContext->window);
+		if (displayIndex < 0)
+			displayIndex = 0;
+	}
+	if (SDL_GetDisplayDPI(displayIndex, &ddpi, NULL, NULL) != 0 || ddpi <= 0.0f)
 		ddpi = 320.0f;
-	touchMm = (int)(ddpi / 25.4f + 0.5f);
-	if (touchMm < 1)
-		touchMm = 1;
+	int mm = (int)(ddpi / 25.4f + 0.5f);
+	if (mm < 1)
+		mm = 1;
+	if (mm != touchMm)
+	{
+		touchMm = mm;
+		/* DPI сменился (другой дисплей) — форс пересчёта раскладки
+		   в Touch_Layout (её кэш смену DPI не отслеживает). */
+		touchLayoutW = 0;
+	}
+}
+
+void Touch_Init(void)
+{
+	Touch_RefreshDpi();
 
 	touch_looksens = Cvar_Get("touch_looksens", "1.0", CVAR_ARCHIVE);
 	touch_uiscale = Cvar_Get("touch_uiscale", "1.0", CVAR_ARCHIVE);
@@ -936,5 +958,6 @@ void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y)
 }
 void Touch_Frame(void) {}
 void Touch_DrawOverlay(void) {}
+void Touch_RefreshDpi(void) {}
 
 #endif

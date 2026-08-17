@@ -111,8 +111,15 @@ on_error:
 void sdlwFinalize() {
 	SdlwContext *sdlw = sdlwContext;
 	if (sdlw == NULL) return;
-    
+
+#if !defined(AURORA_OS)
     SDL_Quit();
+#endif
+    /* Под AURORA_OS SDL_Quit сознательно не вызываем: теперь GL-контекст
+       создаётся через SDL (eglwInitialize), и видео-шатдаун SDL потянул бы
+       разрушение EGL (eglTerminate и т.п.), которое под libhybris падает
+       (eglplatform_wayland.so — прежний workaround eglwFinalize). Процесс
+       всё равно завершается, ресурсы отдаст ОС. */
     
     free(sdlw);
     sdlwContext = NULL;

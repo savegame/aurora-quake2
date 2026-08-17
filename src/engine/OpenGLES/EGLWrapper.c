@@ -214,43 +214,6 @@ static DISPMANX_ELEMENT_HANDLE_T dispman_element;
 static EGL_DISPMANX_WINDOW_T l_dispmanWindow;
 #endif
 
-#if defined(AURORA_OS)
-#include <dlfcn.h>
-/* Mali-wayland (DRM-устройства Авроры): SDL для SDL_WINDOW_OPENGL-окна уже
-   создаёт СВОЙ EGLSurface на своём wl_egl_window (SDL_waylandwindow.c), а вторая
-   eglCreateWindowSurface на том же native window по спеке EGL даёт EGL_BAD_ALLOC.
-   libhybris (hwcomposer-устройства) это терпел, Mali — нет. Поэтому создаём
-   СОБСТВЕННЫЙ wl_egl_window на той же wl_surface. Символы тянем dlopen'ом,
-   как это делает сам SDL (заголовков wayland-egl в sysroot может не быть).
-   На каждый вызов — новый wl_egl_window: eglwInitialize под Авророй не
-   разрушает старый EGLSurface (libhybris падал, см. eglwFinalize), а повторное
-   создание surface на том же wl_egl_window дало бы тот же EGL_BAD_ALLOC. */
-struct wl_egl_window;
-typedef struct wl_egl_window *(*EglwWlEglWindowCreateFn)(struct wl_surface *, int, int);
-
-static EGLNativeWindowType eglwAuroraCreateEglWindow(struct wl_surface *surface)
-{
-    static EglwWlEglWindowCreateFn createFn = NULL;
-    static int loadTried = 0;
-    if (!loadTried)
-    {
-        loadTried = 1;
-        void *handle = dlopen("libwayland-egl.so.1", RTLD_LAZY | RTLD_GLOBAL);
-        if (handle != NULL)
-            createFn = (EglwWlEglWindowCreateFn)dlsym(handle, "wl_egl_window_create");
-    }
-    if (createFn == NULL || surface == NULL)
-        return (EGLNativeWindowType)NULL;
-
-    int w = 0, h = 0;
-    SDL_GL_GetDrawableSize(sdlwContext->window, &w, &h);
-    if (w <= 0 || h <= 0)
-        SDL_GetWindowSize(sdlwContext->window, &w, &h);
-    printf("eglw: own wl_egl_window %dx%d (Mali-wayland EGL_BAD_ALLOC workaround)\n", w, h);
-    return (EGLNativeWindowType)createFn(surface, w, h);
-}
-#endif /* AURORA_OS */
-
 static EGLNativeWindowType eglwGetNativeWindow()
 {
     EGLNativeWindowType nativeWindow = NULL;
@@ -352,13 +315,11 @@ static EGLNativeWindowType eglwGetNativeWindow()
     {
         #if defined(SDL_VIDEO_DRIVER_WAYLAND)
         if (wmInfo.subsystem == SDL_SYSWM_WAYLAND) {
-            #if defined(AURORA_OS)
-            // Wayland: свой wl_egl_window (см. eglwAuroraCreateEglWindow).
-            nativeWindow = eglwAuroraCreateEglWindow(wmInfo.info.wl.surface);
-            #else
-            // Wayland: SDL creates wl_egl_window for SDL_WINDOW_OPENGL windows.
+            // Wayland: SDL creates wl_egl_window for SDL_WINDOW_OPENGL windows
+            // и сам ресайзит его по configure композитора (ресайз окна,
+            // перенос на другой дисплей). Свой wl_egl_window НЕ создаём:
+            // ручное управление EGL-окном ломало ресайз/перенос окна.
             nativeWindow = wmInfo.info.wl.egl_window;
-            #endif
         }
         #endif
         #if defined(SDL_VIDEO_DRIVER_X11)
@@ -375,6 +336,66 @@ static EGLNativeWindowType eglwGetNativeWindow()
 }
 
 bool eglwInitialize(EglwConfigInfo *minimalCfgi, EglwConfigInfo *requestedCfgi, bool maxQualityFlag) {
+#if defined(AURORA_OS)
+	/* Аврора: GL-контекст создаётся чистым SDL2 API. SDL сам управляет
+	   wl_egl_window/EGL (создание для SDL_WINDOW_OPENGL-окна, ресайз по
+	   configure композитора, перенос окна между дисплеями) — собственной
+	   инициализации EGL и своего EGL-окна у нас нет (ручной wl_egl_window
+	   ломал DRM-устройства и не ресайзился при переносе окна на внешний
+	   экран). Окно к этому моменту уже существует: его создаёт лаунчер
+	   (Launcher_Run) или R_Window_update до R_Window_createContext. */
+	(void)minimalCfgi;
+	(void)maxQualityFlag;
+	if (eglwContext != NULL)
+		return false; /* контекст уже создан (лаунчер) — переиспользуем. */
+	if (sdlwContext == NULL || sdlwContext->window == NULL) {
+		printf("Cannot create a GL context: no SDL window.\n");
+		return true;
+	}
+
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+	SDL_GL_SetAttribute(SDL_GL_RED_SIZE,     requestedCfgi ? requestedCfgi->redSize     : 5);
+	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,   requestedCfgi ? requestedCfgi->greenSize   : 5);
+	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,    requestedCfgi ? requestedCfgi->blueSize    : 5);
+	SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE,   requestedCfgi ? requestedCfgi->alphaSize   : 0);
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,   requestedCfgi ? requestedCfgi->depthSize   : 16);
+	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, requestedCfgi ? requestedCfgi->stencilSize : 1);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, (requestedCfgi && requestedCfgi->samples > 0) ? 1 : 0);
+	SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, requestedCfgi ? requestedCfgi->samples : 0);
+
+	SDL_GLContext glContext = SDL_GL_CreateContext(sdlwContext->window);
+	if (glContext == NULL) {
+		printf("Cannot create a GL context: %s\n", SDL_GetError());
+		return true;
+	}
+	if (SDL_GL_MakeCurrent(sdlwContext->window, glContext) != 0) {
+		printf("Cannot make current the GL context: %s\n", SDL_GetError());
+		SDL_GL_DeleteContext(glContext);
+		return true;
+	}
+
+	EglwContext *eglw = malloc(sizeof(EglwContext));
+	if (eglw == NULL) return true;
+	eglw->display = NULL;
+	eglw->config = NULL;
+	eglw->surface = NULL;
+	eglw->context = (EGLContext)glContext;
+	eglwClearConfigInfo(&eglw->configInfo);
+	/* Фактические параметры конфигурации, выбранной SDL. */
+	SDL_GL_GetAttribute(SDL_GL_RED_SIZE, &eglw->configInfo.redSize);
+	SDL_GL_GetAttribute(SDL_GL_GREEN_SIZE, &eglw->configInfo.greenSize);
+	SDL_GL_GetAttribute(SDL_GL_BLUE_SIZE, &eglw->configInfo.blueSize);
+	SDL_GL_GetAttribute(SDL_GL_ALPHA_SIZE, &eglw->configInfo.alphaSize);
+	SDL_GL_GetAttribute(SDL_GL_DEPTH_SIZE, &eglw->configInfo.depthSize);
+	SDL_GL_GetAttribute(SDL_GL_STENCIL_SIZE, &eglw->configInfo.stencilSize);
+	SDL_GL_GetAttribute(SDL_GL_MULTISAMPLESAMPLES, &eglw->configInfo.samples);
+	eglw->configInfoAbilities = eglw->configInfo;
+	eglwContext = eglw;
+	return false;
+#else
     eglwFinalize();
 
 	EglwContext *eglw = malloc(sizeof(EglwContext));
@@ -472,6 +493,7 @@ on_error:
 	printf("EGL error: %04x\n", eglGetError());
 	eglwFinalize();
     return true;
+#endif
 }
 
 void eglwFinalize() {
@@ -479,9 +501,14 @@ void eglwFinalize() {
 	if (eglw != NULL)
 	{
 		#if defined(AURORA_OS)
-		// eglplatform_wayland.so из libhybris падает в eglMakeCurrent/eglTerminate
-		// при шатдауне. Процесс всё равно завершается, поэтому под Авророй
-		// разрушение EGL не выполняем, а просто освобождаем контекст.
+		/* GL-контекстом владеет SDL. SDL_GL_DeleteContext сознательно НЕ
+		   вызываем: разрушение GL/EGL при шатдауне под libhybris падает
+		   (прежний workaround с eglplatform_wayland.so), а vid_restart
+		   пересоздаёт окно (R_Window_finalize → sdlwDestroyWindow →
+		   R_Window_update создаст новое) — новый контекст пойдёт на новое
+		   окно, двойного EGLSurface на одном wl_egl_window (EGL_BAD_ALLOC
+		   на Mali) не возникает. SDL_GLContext при этом утекает — допустимо,
+		   раньше при restart так же утекал весь EGL display/context. */
 		#else
 		eglMakeCurrent(eglw->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 		eglDestroySurface(eglw->display, eglw->surface);
@@ -505,8 +532,14 @@ void eglwFinalize() {
 }
 
 void eglwSwapBuffers() {
+#if defined(AURORA_OS)
+	/* Аврора: swap — через SDL (владеет EGL-surface и wl_egl_window). */
+	if (sdlwContext != NULL && sdlwContext->window != NULL)
+		SDL_GL_SwapWindow(sdlwContext->window);
+#else
 	EglwContext *eglw = eglwContext;
 	if (!eglSwapBuffers(eglw->display, eglw->surface)) {
 		printf("Cannot swap buffers.\n");
 	}
+#endif
 }

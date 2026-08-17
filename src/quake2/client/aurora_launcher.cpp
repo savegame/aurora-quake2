@@ -851,7 +851,12 @@ extern "C" int Launcher_Run( void )
 		SDL_GetWindowSize( window, &ww, &wh );
 		SDL_GL_GetDrawableSize( window, &dw, &dh );
 		printf( "Launcher: запущен, окно %dx%d, drawable %dx%d\n", ww, wh, dw, dh );
-		if( SDL_GetCurrentDisplayMode( 0, &cur ) == 0 )
+		/* Режим — по дисплею, на котором реально оказалось окно (перенос
+		   на внешний экран), а не по захардкоженному дисплею 0. */
+		int displayIndex = SDL_GetWindowDisplayIndex( window );
+		if( displayIndex < 0 )
+			displayIndex = 0;
+		if( SDL_GetCurrentDisplayMode( displayIndex, &cur ) == 0 )
 			printf( "Launcher: current display mode %dx%d\n", cur.w, cur.h );
 		fflush( stdout );
 	}
@@ -871,7 +876,9 @@ extern "C" int Launcher_Run( void )
 			return 1;
 		}
 	}
-	eglSwapInterval( eglwContext->display, 1 );
+	/* GL-контекст создан через SDL (eglwInitialize под AURORA_OS) —
+	   vsync через SDL API. */
+	SDL_GL_SetSwapInterval( 1 );
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();

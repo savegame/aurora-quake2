@@ -262,13 +262,21 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 
 	l_fbo.ready = true;
 	R_printf(PRINT_ALL, "RFBO: %ix%i -> screen %ix%i\n", l_fbo.fboW, l_fbo.fboH, l_fbo.screenW, l_fbo.screenH);
-	/* Временная диагностика: что SDL сообщает о дисплее на старте рендера. */
+	/* Временная диагностика: что SDL сообщает о дисплее на старте рендера.
+	   Дисплей — по окну (перенос на внешний экран), не захардкоженный 0. */
 	{
+		int displayIndex = 0;
+		if (sdlwContext != NULL && sdlwContext->window != NULL)
+		{
+			displayIndex = SDL_GetWindowDisplayIndex(sdlwContext->window);
+			if (displayIndex < 0)
+				displayIndex = 0;
+		}
 		SDL_DisplayMode dm;
 		SDL_Rect ub;
-		if (SDL_GetDesktopDisplayMode(0, &dm) == 0)
+		if (SDL_GetDesktopDisplayMode(displayIndex, &dm) == 0)
 			R_printf(PRINT_ALL, "RFBO: desktop display mode %ix%i\n", dm.w, dm.h);
-		if (SDL_GetDisplayUsableBounds(0, &ub) == 0)
+		if (SDL_GetDisplayUsableBounds(displayIndex, &ub) == 0)
 			R_printf(PRINT_ALL, "RFBO: usable bounds %ix%i\n", ub.w, ub.h);
 	}
 	return true;
@@ -287,12 +295,20 @@ void RFBO_Resize(int windowWidth, int windowHeight)
 {
 	if (!l_fbo.ready)
 		return;
-	if (windowWidth == l_fbo.screenW && windowHeight == l_fbo.screenH)
+
+	/* Сравниваем не только размер окна, но и вычисленный размер FBO: он
+	   зависит и от rotation (перевёрнутые пропорции на 90/270), поэтому
+	   смена поворота при том же размере окна тоже ведёт к пересозданию. */
+	int newFboW, newFboH;
+	RFBO_ComputeSize(windowWidth, windowHeight, &newFboW, &newFboH);
+	if (windowWidth == l_fbo.screenW && windowHeight == l_fbo.screenH &&
+		newFboW == l_fbo.fboW && newFboH == l_fbo.fboH)
 		return;
 
 	l_fbo.screenW = windowWidth;
 	l_fbo.screenH = windowHeight;
-	RFBO_ComputeSize(windowWidth, windowHeight, &l_fbo.fboW, &l_fbo.fboH);
+	l_fbo.fboW = newFboW;
+	l_fbo.fboH = newFboH;
 
 	RFBO_DestroyTargets();
 	if (!RFBO_CreateTargets(l_fbo.fboW, l_fbo.fboH))
@@ -303,6 +319,9 @@ void RFBO_Resize(int windowWidth, int windowHeight)
 
 	viddef.width = l_fbo.fboW;
 	viddef.height = l_fbo.fboH;
+	/* Редкое событие (реальный ресайз/перенос на другой дисплей) — можно в лог. */
+	R_printf(PRINT_ALL, "RFBO: resize %ix%i -> screen %ix%i rotation %i\n",
+		l_fbo.fboW, l_fbo.fboH, l_fbo.screenW, l_fbo.screenH, l_fbo.rotation);
 }
 
 void RFBO_BindForFrame(void)
@@ -391,7 +410,18 @@ float RFBO_GetScale(void)
 
 void RFBO_SetRotation(int wlOutputTransform)
 {
-	l_fbo.rotation = wlOutputTransform & 3;
+	int newRotation = wlOutputTransform & 3;
+	/* Переход 90/270 ↔ 0/180 меняет пропорции буфера (флаг swapped в
+	   RFBO_ComputeSize) — FBO надо пересоздать, даже если размер окна не
+	   изменился (перенос окна между портретной и ландшафтной панелями).
+	   RFBO_Resize сам сравнит вычисленный размер с текущим и пересоздаст. */
+	if (l_fbo.ready && ((l_fbo.rotation ^ newRotation) & 1) != 0)
+	{
+		l_fbo.rotation = newRotation;
+		RFBO_Resize(l_fbo.screenW, l_fbo.screenH);
+		return;
+	}
+	l_fbo.rotation = newRotation;
 }
 
 int RFBO_GetRotation(void)

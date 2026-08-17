@@ -2,6 +2,9 @@
 #include "client/keyboard.h"
 #include "client/refresh/r_private.h"
 #include "client/refresh/r_fbo.h"
+#if defined(AURORA_OS)
+#include "client/cl_touch.h"
+#endif
 
 #if defined(AURORA_FBO)
 #include <SDL2/SDL_syswm.h>
@@ -3436,22 +3439,42 @@ static int R_AuroraComputeTransform(void)
 	// mode от композитора, частые запросы ничего не стоят).
 	bool portraitPanel = true;
 	SDL_DisplayMode mode;
+	mode.w = 0; mode.h = 0;
 	if (SDL_GetCurrentDisplayMode(displayIndex, &mode) == 0)
 		portraitPanel = mode.h > mode.w;
 
-	switch (SDL_GetDisplayOrientation(displayIndex))
+	SDL_DisplayOrientation orientation = SDL_GetDisplayOrientation(displayIndex);
+	int transform;
+	switch (orientation)
 	{
 	case SDL_ORIENTATION_LANDSCAPE:
-		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		transform = portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		break;
 	case SDL_ORIENTATION_LANDSCAPE_FLIPPED:
-		return portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+		transform = portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+		break;
 	case SDL_ORIENTATION_PORTRAIT:
-		return portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+		transform = portraitPanel ? WL_OUTPUT_TRANSFORM_270 : WL_OUTPUT_TRANSFORM_180;
+		break;
 	case SDL_ORIENTATION_PORTRAIT_FLIPPED:
-		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		transform = portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		break;
 	default:
-		return portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		transform = portraitPanel ? WL_OUTPUT_TRANSFORM_90 : WL_OUTPUT_TRANSFORM_NORMAL;
+		break;
 	}
+
+	/* Диагностика переноса окна между дисплеями: вызов только по событиям
+	   (init, смена ориентации, DISPLAY_CHANGED/MOVED) — не каждый кадр. */
+	{
+		int ww = 0, wh = 0, dw = 0, dh = 0;
+		SDL_GetWindowSize(sdlw->window, &ww, &wh);
+		SDL_GL_GetDrawableSize(sdlw->window, &dw, &dh);
+		R_printf(PRINT_ALL,
+			"Aurora transform: display %i mode %ix%i orientation %i -> transform %i; window %ix%i drawable %ix%i\n",
+			displayIndex, mode.w, mode.h, (int)orientation, transform, ww, wh, dw, dh);
+	}
+	return transform;
 }
 
 void R_AuroraUpdateTransform(void)
@@ -4091,14 +4114,47 @@ static bool R_Window_update(bool forceFlag)
     }
     
 	int effectiveWidth, effectiveHeight;
-	SDL_GetWindowSize(sdlw->window, &effectiveWidth, &effectiveHeight);
+#if defined(AURORA_FBO)
+	/* Размер БЭКБУФЕРА (drawable), а не логический размер окна: на внешнем
+	   дисплее buffer scale может отличаться от 1, и тогда SDL_GetWindowSize
+	   не совпадает с реальным размером EGL surface. FBO и viewport блита
+	   обязаны быть в пикселях бэкбуфера — иначе блит занимает часть окна
+	   (сжатая картинка + чёрные области). Фолбэк — размер окна. */
+	SDL_GL_GetDrawableSize(sdlw->window, &effectiveWidth, &effectiveHeight);
+	if (effectiveWidth <= 0 || effectiveHeight <= 0)
+#endif
+		SDL_GetWindowSize(sdlw->window, &effectiveWidth, &effectiveHeight);
 	sdlwResize(effectiveWidth, effectiveHeight);
 #if defined(AURORA_FBO)
+	/* Перенос окна на другой дисплей: НЕ полагаемся на порядок и доставку
+	   событий (SDL_WINDOWEVENT_DISPLAY_CHANGED может прийти до обновления
+	   ассоциации окна с output'ом — тогда SDL_GetWindowDisplayIndex ещё
+	   вернёт старый дисплей — или не прийти вовсе). Раз в кадр сверяем
+	   индекс дисплея окна и по факту смены пересчитываем transform (тип
+	   панели + ориентация берутся свежие, для текущего дисплея) и DPI
+	   тач-оверлея. Проверка дешёвая: SDL кэширует ассоциацию окна. */
+	{
+		static int l_lastDisplayIndex = -1;
+		int displayIndex = SDL_GetWindowDisplayIndex(sdlw->window);
+		if (displayIndex >= 0)
+		{
+			if (l_lastDisplayIndex >= 0 && displayIndex != l_lastDisplayIndex)
+			{
+				R_printf(PRINT_ALL, "Aurora: window display changed %i -> %i\n",
+					l_lastDisplayIndex, displayIndex);
+				R_AuroraUpdateTransform();
+				Touch_RefreshDpi();
+			}
+			l_lastDisplayIndex = displayIndex;
+		}
+	}
 	// Подмена размеров экрана размерами FBO: движок рендерит в FBO,
 	// для него "экран" — это буфер FBO. RFBO_Resize сам решит, нужно ли
-	// пересоздание; до RFBO_Init размер FBO = 0 — берём размер окна.
+	// пересоздание; до RFBO_Init размер FBO = 0 — берём размер бэкбуфера.
 	RFBO_Resize(effectiveWidth, effectiveHeight);
 	RFBO_GetSize(&effectiveWidth, &effectiveHeight);
+	if (effectiveWidth <= 0 || effectiveHeight <= 0)
+		SDL_GL_GetDrawableSize(sdlw->window, &effectiveWidth, &effectiveHeight);
 	if (effectiveWidth <= 0 || effectiveHeight <= 0)
 		SDL_GetWindowSize(sdlw->window, &effectiveWidth, &effectiveHeight);
 #endif
@@ -4151,7 +4207,12 @@ static bool R_Window_createContext()
 	Cvar_SetValue("r_msaa_samples", eglwContext->configInfo.samples);
 	r_stencilAvailable = (eglwContext->configInfo.stencilSize > 0);
 
+#if defined(AURORA_OS)
+	/* GL-контекстом владеет SDL (eglwInitialize) — vsync через SDL API. */
+	SDL_GL_SetSwapInterval(gl_swapinterval->value ? 1 : 0);
+#else
 	eglSwapInterval(eglwContext->display, gl_swapinterval->value ? 1 : 0);
+#endif
 
 	if (oglwCreate())
 		goto on_error;
@@ -4378,7 +4439,12 @@ static bool R_setup()
 	if (strstr(extensions_string, "GL_EXT_discard_framebuffer"))
 	{
 		R_printf(PRINT_ALL, "Using GL_EXT_discard_framebuffer\n");
+#if defined(AURORA_OS)
+		/* GL-контекст создан через SDL — адреса функций берём через SDL API. */
+		gl_config.discardFramebuffer = (PFNGLDISCARDFRAMEBUFFEREXTPROC)SDL_GL_GetProcAddress("glDiscardFramebufferEXT");
+#else
 		gl_config.discardFramebuffer = (PFNGLDISCARDFRAMEBUFFEREXTPROC)eglGetProcAddress("glDiscardFramebufferEXT");
+#endif
 	}
 	else
 	{

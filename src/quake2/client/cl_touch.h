@@ -29,6 +29,10 @@ void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y);
    пальцем). Вызов из IN_Update. */
 void Touch_Frame(void);
 
+/* Пересчёт DPI по текущему дисплею окна (перенос на другой дисплей).
+   При смене DPI форсит пересчёт раскладки кнопок. */
+void Touch_RefreshDpi(void);
+
 /* Отрисовка оверлея. Вызов из SCR_UpdateScreen (меню/игра/cinematic). */
 void Touch_DrawOverlay(void);
 
