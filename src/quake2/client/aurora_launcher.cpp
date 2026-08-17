@@ -55,7 +55,7 @@ extern "C" {
 #define AURORA_ORG "ru.sashikknox"
 #endif
 #ifndef AURORA_APP
-#define AURORA_APP "quake2"
+#define AURORA_APP "QuakeII"
 #endif
 
 namespace {

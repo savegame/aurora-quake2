@@ -38,7 +38,7 @@ add_compile_definitions(EGLW_GLES2 NOUNCRYPT ZIP __unix__)
 # Дефайны для порта под Аврору.
 add_compile_definitions(AURORA_OS)
 set(AURORA_ORG "ru.sashikknox" CACHE STRING "Organization name для песочницы Авроры")
-set(AURORA_APP "quake2" CACHE STRING "Application name для песочницы Авроры")
+set(AURORA_APP "QuakeII" CACHE STRING "Application name для песочницы Авроры")
 add_compile_definitions(AURORA_ORG="${AURORA_ORG}")
 add_compile_definitions(AURORA_APP="${AURORA_APP}")
 
@@ -193,7 +193,9 @@ endif()
 add_executable(quake2 ${QUAKE2_SOURCES})
 
 # В проекте есть C++ (imgui) — линкуем C++-линкером (libstdc++).
-set_target_properties(quake2 PROPERTIES LINKER_LANGUAGE CXX)
+# Имя бинаря = appname пакета (ru.sashikknox.QuakeII): rpm/game.spec
+# устанавливает build/<arch>/rpm/QuakeII в %{_bindir}/%{name}.
+set_target_properties(quake2 PROPERTIES LINKER_LANGUAGE CXX OUTPUT_NAME "${AURORA_APP}")
 
 target_include_directories(quake2 PRIVATE
     ${SDL2_INCLUDE_DIRS}

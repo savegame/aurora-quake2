@@ -1,10 +1,10 @@
 %define _app_orgname ru.sashikknox
-%define _app_appname quake2
+%define _app_appname QuakeII
 %define _app_launcher_name Quake 2
 
 Name:       %{_app_orgname}.%{_app_appname}
 Summary:    Quake 2 for Aurora OS
-Release:    1
+Release:    2
 Version:    1.0.0
 Group:      Amusements/Games
 License:    GPL-2.0+
@@ -53,7 +53,7 @@ cmake \
 cmake --build build/%{_arch}/rpm
 
 %install
-install -m 0755 -D build/%{_arch}/rpm/quake2 %{buildroot}%{_bindir}/%{name}
+install -m 0755 -D build/%{_arch}/rpm/QuakeII %{buildroot}%{_bindir}/%{name}
 patchelf --force-rpath --set-rpath %{_datadir}/%{name}/lib %{buildroot}%{_bindir}/%{name}
 
 # Bundled SDL2 (Aurora fixes, savegame/SDL)
