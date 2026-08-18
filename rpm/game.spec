@@ -10,7 +10,7 @@ Group:      Amusements/Games
 License:    GPL-2.0+
 Source0:    %{name}.tar.gz
 
-%define __requires_exclude ^libopenal.*\.so.*|libvorbis.*\.so.*|libogg.*\.so.*|libSDL2.*\.so.*|libGLESv2.*\.so.*|libEGL.*\.so.*|libz.*\.so.*$
+%define __requires_exclude ^libopenal.*\.so.*|libvorbis.*\.so.*|libogg.*\.so.*|libSDL2.*\.so.*|libz.*\.so.*$
 %define __provides_exclude_from ^%{_datadir}/%{name}/lib/.*\.so.*$
 
 BuildRequires: cmake
@@ -22,6 +22,7 @@ BuildRequires: pkgconfig(wayland-egl)
 BuildRequires: pkgconfig(wayland-protocols)
 BuildRequires: pkgconfig(wayland-scanner)
 BuildRequires: pkgconfig(glesv2)
+BuildRequires: pkgconfig(glesv1_cm)
 BuildRequires: pkgconfig(xkbcommon)
 BuildRequires: pkgconfig(vulkan)
 BuildRequires: pkgconfig(egl)
@@ -71,6 +72,9 @@ install -d %{buildroot}%{_datadir}/%{name}/baseq2
 install -d %{buildroot}%{_datadir}/%{name}/ctf
 install -d %{buildroot}%{_datadir}/%{name}/rogue
 install -d %{buildroot}%{_datadir}/%{name}/xatrix
+
+# Gamepad mappings database (SDL_GameControllerDB), read at gamepad init
+install -m 644 -D gamecontrollerdb.txt %{buildroot}%{_datadir}/%{name}/gamecontrollerdb.txt
 
 # Icons
 install -m 644 -D icons/86.png  %{buildroot}%{_datadir}/icons/hicolor/86x86/apps/%{name}.png

@@ -494,6 +494,32 @@ bool IN_processEvent(SDL_Event *event)
 	}
 	break;
 
+	case SDL_CONTROLLERDEVICEADDED:
+	{
+		int device_index = event->cdevice.which;
+		if (!l_controller && SDL_IsGameController(device_index))
+		{
+			l_controller = SDL_GameControllerOpen(device_index);
+			if (l_controller)
+				Com_Printf("Gamepad connected: %s\n", SDL_GameControllerName(l_controller));
+			else
+				R_printf(PRINT_ALL, "Could not open gamecontroller %i: %s\n", device_index, SDL_GetError());
+		}
+	}
+	break;
+	case SDL_CONTROLLERDEVICEREMOVED:
+	{
+		SDL_JoystickID instance_id = event->cdevice.which;
+		if (l_controller && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(l_controller)) == instance_id)
+		{
+			const char *name = SDL_GameControllerName(l_controller);
+			Com_Printf("Gamepad disconnected: %s\n", name ? name : "unknown");
+			SDL_GameControllerClose(l_controller);
+			l_controller = NULL;
+		}
+	}
+	break;
+
 	case SDL_CONTROLLERAXISMOTION:
 		break;
 	case SDL_CONTROLLERBUTTONDOWN:
@@ -750,6 +776,13 @@ void IN_Init()
 		}
 		else
 		{
+			const char *mappingsPath = va("%s/gamecontrollerdb.txt", Cvar_VariableString("basedir"));
+			int mappingsAdded = SDL_GameControllerAddMappingsFromFile(mappingsPath);
+			if (mappingsAdded < 0)
+				R_printf(PRINT_ALL, "Could not load gamepad mappings from %s: %s\n", mappingsPath, SDL_GetError());
+			else
+				Com_Printf("Loaded %d gamepad mapping(s) from %s\n", mappingsAdded, mappingsPath);
+
 			if (SDL_NumJoysticks() > 0)
 			{
 				int n = SDL_NumJoysticks();
@@ -764,6 +797,10 @@ void IN_Init()
 							{
 								R_printf(PRINT_ALL, "Could not open gamecontroller %i: %s\n", i, SDL_GetError());
 							}
+							else
+							{
+								Com_Printf("Gamepad connected: %s\n", SDL_GameControllerName(l_controller));
+							}
 						}
 					}
 					else
@@ -774,6 +811,10 @@ void IN_Init()
 							if (!l_joystick)
 							{
 								R_printf(PRINT_ALL, "Could not open l_joystick %i: %s\n", i, SDL_GetError());
+							}
+							else
+							{
+								Com_Printf("Gamepad connected: %s\n", SDL_JoystickName(l_joystick));
 							}
 						}
 					}

@@ -79,6 +79,7 @@ if(BUNDLE_SDL2)
     set(SDL_WAYLAND_LIBDECOR OFF CACHE BOOL "" FORCE)
     set(SDL_X11 OFF CACHE BOOL "" FORCE)
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(HAVE_LIBUDEV_H OFF CACHE BOOL "" FORCE)
     add_subdirectory(libsdl)
     set(SDL2_TARGET SDL2)
     # EGL под Wayland: нативные типы wl_display/wl_egl_window вместо X11
