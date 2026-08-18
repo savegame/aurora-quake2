@@ -28,6 +28,7 @@ BuildRequires: pkgconfig(vulkan)
 BuildRequires: pkgconfig(egl)
 BuildRequires: pkgconfig(libpulse)
 BuildRequires: pkgconfig(dbus-1)
+BuildRequires: pkgconfig(libudev)
 
 %description
 Quake 2 ported to Aurora OS using SDL2 and OpenGL ES 2 backend.

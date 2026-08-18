@@ -768,6 +768,11 @@ void IN_Init()
 
 	SDL_StartTextInput();
 
+	/* Steam Controller через HIDAPI (проводной/Bluetooth): по умолчанию
+	   выключен в SDL2, хинт нужно выставить до SDL_Init(SDL_INIT_JOYSTICK).
+	   Донгл 2.4 ГГц уже включён отдельным хинтом по умолчанию в SDL2. */
+	SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_STEAM, "1");
+
 	if (!SDL_WasInit(SDL_INIT_JOYSTICK))
 	{
 		if (SDL_Init(SDL_INIT_JOYSTICK) == -1)
