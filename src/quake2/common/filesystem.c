@@ -1020,6 +1020,12 @@ static void FS_AddGameDirectories(const char * dir)
 		const char *homeEnv = getenv("HOME");
 		if (homeEnv != NULL && homeEnv[0] != '\0')
 			FS_AddGameDirectory(va("%s/%s/%s", homeEnv, "Downloads/Games/Quake2", dir));
+
+		// Тот же путь, что и basedir (/usr/share/<org>.<app>), но с
+		// наивысшим приоритетом поиска среди путей ресурсов: файлы
+		// (например, platform.cfg), докинутые туда напрямую по ssh
+		// (root), перекрывают версию из RPM без переустановки пакета.
+		FS_AddGameDirectory(va("%s/%s", "/usr/share/" AURORA_ORG "." AURORA_APP, dir));
 	}
 	#endif
 	#if defined(__GCW_ZERO__)

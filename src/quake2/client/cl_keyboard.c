@@ -103,6 +103,11 @@ keyname_t keynames[] =
 	{ "DOWN", K_GAMEPAD_DOWN },
 	{ "UP", K_GAMEPAD_UP },
 
+	{ "LSTICK", K_GAMEPAD_LSTICK },
+	{ "RSTICK", K_GAMEPAD_RSTICK },
+	{ "LTRIGGER", K_GAMEPAD_LTRIGGER },
+	{ "RTRIGGER", K_GAMEPAD_RTRIGGER },
+
 	//    {"A", K_GAMEPAD_A},
 	//    {"B", K_GAMEPAD_B},
 	//    {"X", K_GAMEPAD_X},

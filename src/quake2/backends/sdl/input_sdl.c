@@ -521,7 +521,36 @@ bool IN_processEvent(SDL_Event *event)
 	break;
 
 	case SDL_CONTROLLERAXISMOTION:
-		break;
+	{
+		/* Триггеры на SDL_GameController API — аналоговые оси, а не
+		   кнопки. Порог по середине хода даёт дискретное нажатие
+		   для K_GAMEPAD_L/RTRIGGER, с гистерезисом по предыдущему
+		   состоянию (иначе Key_Event слался бы на каждое дрожание
+		   около порога). */
+		static bool leftTriggerDown = false;
+		static bool rightTriggerDown = false;
+		const Sint16 triggerThreshold = 16384; /* половина хода оси [0, 32767] */
+
+		if (event->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
+		{
+			bool down = event->caxis.value > triggerThreshold;
+			if (down != leftTriggerDown)
+			{
+				leftTriggerDown = down;
+				Key_Event(K_GAMEPAD_LTRIGGER, down);
+			}
+		}
+		else if (event->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+		{
+			bool down = event->caxis.value > triggerThreshold;
+			if (down != rightTriggerDown)
+			{
+				rightTriggerDown = down;
+				Key_Event(K_GAMEPAD_RTRIGGER, down);
+			}
+		}
+	}
+	break;
 	case SDL_CONTROLLERBUTTONDOWN:
 	case SDL_CONTROLLERBUTTONUP:
 	{
@@ -534,11 +563,11 @@ bool IN_processEvent(SDL_Event *event)
 		case SDL_CONTROLLER_BUTTON_B: key = K_GAMEPAD_B; break;
 		case SDL_CONTROLLER_BUTTON_X: key = K_GAMEPAD_X; break;
 		case SDL_CONTROLLER_BUTTON_Y: key = K_GAMEPAD_Y; break;
-		//case SDL_CONTROLLER_BUTTON_BACK: key = K_GAMEPAD_; break;
+		case SDL_CONTROLLER_BUTTON_BACK: key = K_GAMEPAD_SELECT; break;
 		case SDL_CONTROLLER_BUTTON_GUIDE: key = K_GAMEPAD_SELECT; break;
 		case SDL_CONTROLLER_BUTTON_START: key = K_GAMEPAD_START; break;
-		//case SDL_CONTROLLER_BUTTON_LEFTSTICK: key = K_GAMEPAD_; break;
-		//case SDL_CONTROLLER_BUTTON_RIGHTSTICK: key = K_GAMEPAD_; break;
+		case SDL_CONTROLLER_BUTTON_LEFTSTICK: key = K_GAMEPAD_LSTICK; break;
+		case SDL_CONTROLLER_BUTTON_RIGHTSTICK: key = K_GAMEPAD_RSTICK; break;
 		case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: key = K_GAMEPAD_L; break;
 		case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: key = K_GAMEPAD_R; break;
 		case SDL_CONTROLLER_BUTTON_DPAD_UP: key = K_GAMEPAD_UP; break;

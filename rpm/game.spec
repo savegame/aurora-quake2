@@ -74,6 +74,10 @@ install -d %{buildroot}%{_datadir}/%{name}/ctf
 install -d %{buildroot}%{_datadir}/%{name}/rogue
 install -d %{buildroot}%{_datadir}/%{name}/xatrix
 
+# Default gamepad bindings, exec'd from baseq2 (stays in the search path
+# for all mods, see FS_SetGamedir/fs_baseSearchPaths in filesystem.c)
+install -m 644 -D platform.cfg %{buildroot}%{_datadir}/%{name}/baseq2/platform.cfg
+
 # Gamepad mappings database (SDL_GameControllerDB), read at gamepad init
 install -m 644 -D gamecontrollerdb.txt %{buildroot}%{_datadir}/%{name}/gamecontrollerdb.txt
 
