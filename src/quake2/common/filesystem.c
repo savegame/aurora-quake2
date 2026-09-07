@@ -1003,6 +1003,13 @@ static void FS_AddGameDirectories(const char * dir)
 	FS_CreatePath(va("%s/", fs_writableGamedir));
 	Com_Printf("Using '%s' for writing.\n", fs_writableGamedir);
 
+#ifdef AURORA_OS
+	/* q2pro-наследники (напр. OpenFFA) определяют game.dir через cvar
+	   fs_gamedir (с проверкой флага CVAR_NOSET) — без этого мода пишут в
+	   read-only каталог установки пакета. Отдаём writable-каталог мода. */
+	Cvar_FullSet("fs_gamedir", fs_writableGamedir, CVAR_SERVERINFO | CVAR_NOSET);
+#endif
+
 	if (fs_cddir->string[0] != '\0')
 		FS_AddGameDirectory(va("%s/%s", fs_cddir->string, dir));
 	FS_AddGameDirectory(va("%s/%s", fs_basedir->string, dir));
