@@ -236,3 +236,17 @@ add_quake2_mission(baseq2 game)
 add_quake2_mission(ctf ctf/src)
 add_quake2_mission(rogue rogue/src)
 add_quake2_mission(xatrix xatrix/src)
+
+# --- OpenFFA (сетевой FFA-мод, q2pro/openffa) -------------------------------
+# Источники мода самодостаточны (свой q_shared.c) — glob из корня подмодуля.
+# g_sqlite.c / g_curl.c / g_udp.c исключены: опциональные внешние зависимости.
+# Без дефайна XATRIX — чистый OpenFFA (GAMEVERSION "OpenFFA").
+file(GLOB OPENFFA_SOURCES openffa/*.c)
+list(FILTER OPENFFA_SOURCES EXCLUDE REGEX "openffa/(g_sqlite|g_curl|g_udp)\\.c$")
+add_library(openffa SHARED ${OPENFFA_SOURCES})
+target_include_directories(openffa PRIVATE openffa)
+set_target_properties(openffa PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "game"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/openffa"
+)

@@ -543,6 +543,11 @@ void DrawTab_Game()
 	}
 	ImGui::TextDisabled( "Дополнения активны при наличии <мод>/*.pak в папке ресурсов" );
 
+	/* OpenFFA — сетевой FFA-мод (game.so в пакете, ресурсы — baseq2),
+	   pak-файлов не требует: кнопка активна вместе с базовой игрой. */
+	if( ImGui::Button( "OpenFFA (сетевая игра)", ImVec2( -1, btn_h )))
+		StartGame( "openffa" );
+
 	ImGui::EndDisabled();
 }
 

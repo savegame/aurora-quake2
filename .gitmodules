@@ -1,3 +1,7 @@
 [submodule "libsdl"]
 	path = libsdl
 	url = https://github.com/savegame/SDL
+[submodule "openffa"]
+	path = openffa
+	url = https://github.com/Niehztog/openffa-xatrix.git
+	branch = master

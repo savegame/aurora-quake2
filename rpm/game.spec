@@ -4,7 +4,7 @@
 
 Name:       %{_app_orgname}.%{_app_appname}
 Summary:    Quake 2 for Aurora OS
-Release:    2
+Release:    3
 Version:    1.0.0
 Group:      Amusements/Games
 License:    GPL-2.0+
@@ -67,6 +67,7 @@ install -m 0755 -D build/%{_arch}/rpm/baseq2/game.so   %{buildroot}%{_datadir}/%
 install -m 0755 -D build/%{_arch}/rpm/ctf/game.so     %{buildroot}%{_datadir}/%{name}/ctf/game.so
 install -m 0755 -D build/%{_arch}/rpm/rogue/game.so    %{buildroot}%{_datadir}/%{name}/rogue/game.so
 install -m 0755 -D build/%{_arch}/rpm/xatrix/game.so  %{buildroot}%{_datadir}/%{name}/xatrix/game.so
+install -m 0755 -D build/%{_arch}/rpm/openffa/game.so %{buildroot}%{_datadir}/%{name}/openffa/game.so
 
 # Directories for user-provided .pak data files
 install -d %{buildroot}%{_datadir}/%{name}/baseq2
