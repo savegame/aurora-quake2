@@ -107,6 +107,10 @@ bool g_browser_open_pending = false;
 bool        g_launch = false;
 std::string g_launch_mod;
 
+/* Старт listen-сервера OpenFFA из вкладки «Сетевая игра»: при передаче
+   управления движку выставляются env AURORA_SV_* (misc.c, Qcommon_Init). */
+bool        g_net_start = false;
+
 /* Тач: тап vs драг. Движение пальца НЕ превращаем в движение мыши (иначе
    кнопки залипают в drag-select): драг — это MouseWheel-импульсы в hovered
    окно imgui, тап — одиночный down+up в точке касания. */
@@ -180,6 +184,107 @@ void RescanMods()
 }
 
 /* ---------------------------------------------------------------------------
+ * Список карт для вкладки «Сетевая игра». Лаунчер работает ДО инициализации
+ * FS движка — читаем сами: loose-файлы <resdir>baseq2maps*.bsp + каталог
+ * ВСЕХ pak-файлов в <resdir>baseq2. Формат pak — «PACK» (кастомный, НЕ pkzip):
+ * заголовок в начале файла (ofs/len каталога), записи по 64 байта:
+ * name[56] + filepos + filelen. Пересканируется вместе с RescanMods.
+ * ------------------------------------------------------------------------- */
+std::vector<std::string> g_net_maps;
+
+static unsigned RdU32LE( const unsigned char *p )
+{
+	return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);
+}
+
+static void CollectMapsFromPak( const std::string &pak, std::vector<std::string> &out )
+{
+	FILE *f = fopen( pak.c_str(), "rb" );
+	if( !f ) return;
+	unsigned char hdr[12];
+	if( fread( hdr, 1, 12, f ) == 12 && memcmp( hdr, "PACK", 4 ) == 0 )
+	{
+		unsigned dirOfs = RdU32LE( hdr + 4 ), dirLen = RdU32LE( hdr + 8 );
+		if( dirLen > 0 && ( dirLen % 64 ) == 0 && fseek( f, (long)dirOfs, SEEK_SET ) == 0 )
+		{
+			for( unsigned i = 0; i < dirLen / 64; i++ )
+			{
+				unsigned char e[64];
+				if( fread( e, 1, 64, f ) != 64 )
+					break;
+				char name[57];
+				memcpy( name, e, 56 );
+				name[56] = 0;
+				/* Интересуют только maps/<имя>.bsp. */
+				if( strncasecmp( name, "maps/", 5 ) != 0 )
+					continue;
+				size_t l = strlen( name );
+				if( l <= 9 || strcasecmp( name + l - 4, ".bsp" ) != 0 )
+					continue;
+				out.emplace_back( name + 5, l - 9 ); /* без "maps/" и ".bsp" */
+			}
+		}
+	}
+	fclose( f );
+}
+
+void RescanNetMaps()
+{
+	g_net_maps.clear();
+	if( g_picker.selected.empty())
+		return;
+	const std::string base = g_picker.selected + "/baseq2";
+
+	/* 1) Карты на диске (подкинутые пользователем). */
+	DIR *d = opendir(( base + "/maps" ).c_str());
+	if( d )
+	{
+		dirent *ent;
+		while(( ent = readdir( d )))
+		{
+			const char *n = ent->d_name;
+			size_t len = strlen( n );
+			if( len > 4 && strcasecmp( n + len - 4, ".bsp" ) == 0 )
+				g_net_maps.emplace_back( n, len - 4 );
+		}
+		closedir( d );
+	}
+
+	/* 2) Карты из всех pak'ов каталога. */
+	DIR *pd = opendir( base.c_str());
+	if( pd )
+	{
+		dirent *ent;
+		while(( ent = readdir( pd )))
+		{
+			const char *n = ent->d_name;
+			size_t len = strlen( n );
+			if( len > 4 && strcasecmp( n + len - 4, ".pak" ) == 0 )
+				CollectMapsFromPak( base + "/" + n, g_net_maps );
+		}
+		closedir( pd );
+	}
+
+	std::sort( g_net_maps.begin(), g_net_maps.end());
+	g_net_maps.erase( std::unique( g_net_maps.begin(), g_net_maps.end()), g_net_maps.end());
+	printf( "Launcher: карт для сетевой игры: %zu\n", g_net_maps.size());
+}
+
+/* Имя карты для Cbuf: только [A-Za-z0-9_-], иначе пустая строка. */
+std::string SanitizeMapName( const std::string &s )
+{
+	std::string r;
+	for( size_t i = 0; i < s.size(); i++ )
+	{
+		char c = s[i];
+		if(( c >= 'a' && c <= 'z' ) || ( c >= 'A' && c <= 'Z' ) ||
+		   ( c >= '0' && c <= '9' ) || c == '_' || c == '-' )
+			r += c;
+	}
+	return r;
+}
+
+/* ---------------------------------------------------------------------------
  * Конфиг лаунчера: ~/.config/<org>/<app>/launcher.conf, key=value.
  *   path       — последний выбранный корень ресурсов
  *   r_3d_scale — множитель разрешения рендера (FBO)
@@ -221,6 +326,15 @@ struct LauncherSettings
 {
 	std::string path;
 	float       r_3d_scale = 1.0f;
+	/* Вкладка «Сетевая игра» — настройки listen-сервера OpenFFA. */
+	std::string sv_map;
+	std::string sv_hostname = "OpenFFA server";
+	int         sv_maxclients = 8;
+	int         sv_fraglimit  = 0; /* 0 = без лимита */
+	int         sv_timelimit  = 0; /* мин, 0 = без лимита */
+	bool        sv_warmup = false; /* g_warmup */
+	bool        sv_votes  = true;  /* g_vote_mask: 35 = tl|fl|map, 0 = выкл */
+	int         sv_itemban = 0;    /* g_item_ban: 1 quad, 2 invuln, 4 BFG, 8 PA */
 };
 
 LauncherSettings g_settings;
@@ -248,10 +362,25 @@ void LoadSettings()
 		std::string v = TrimStr( s.substr( eq + 1 ));
 		if( k == "path" )            g_settings.path = v;
 		else if( k == "r_3d_scale" ) g_settings.r_3d_scale = (float)atof( v.c_str());
+		else if( k == "sv_map" )         g_settings.sv_map = v;
+		else if( k == "sv_hostname" )    g_settings.sv_hostname = v;
+		else if( k == "sv_maxclients" )  g_settings.sv_maxclients = atoi( v.c_str());
+		else if( k == "sv_fraglimit" )   g_settings.sv_fraglimit = atoi( v.c_str());
+		else if( k == "sv_timelimit" )   g_settings.sv_timelimit = atoi( v.c_str());
+		else if( k == "sv_warmup" )      g_settings.sv_warmup = atoi( v.c_str()) != 0;
+		else if( k == "sv_votes" )       g_settings.sv_votes = atoi( v.c_str()) != 0;
+		else if( k == "sv_itemban" )     g_settings.sv_itemban = atoi( v.c_str());
 	}
 	fclose( f );
 	if( g_settings.r_3d_scale < 0.25f ) g_settings.r_3d_scale = 0.25f;
 	if( g_settings.r_3d_scale > 2.0f )  g_settings.r_3d_scale = 2.0f;
+	if( g_settings.sv_maxclients < 2 )   g_settings.sv_maxclients = 2;
+	if( g_settings.sv_maxclients > 16 )  g_settings.sv_maxclients = 16;
+	if( g_settings.sv_fraglimit < 0 )    g_settings.sv_fraglimit = 0;
+	if( g_settings.sv_fraglimit > 999 )  g_settings.sv_fraglimit = 999;
+	if( g_settings.sv_timelimit < 0 )    g_settings.sv_timelimit = 0;
+	if( g_settings.sv_timelimit > 999 )  g_settings.sv_timelimit = 999;
+	g_settings.sv_itemban &= 15;
 }
 
 void SaveSettings()
@@ -261,6 +390,14 @@ void SaveSettings()
 	if( !f ) return;
 	fprintf( f, "path=%s\n",         g_settings.path.c_str());
 	fprintf( f, "r_3d_scale=%.3f\n", g_settings.r_3d_scale );
+	fprintf( f, "sv_map=%s\n",         g_settings.sv_map.c_str());
+	fprintf( f, "sv_hostname=%s\n",    g_settings.sv_hostname.c_str());
+	fprintf( f, "sv_maxclients=%d\n",  g_settings.sv_maxclients );
+	fprintf( f, "sv_fraglimit=%d\n",   g_settings.sv_fraglimit );
+	fprintf( f, "sv_timelimit=%d\n",   g_settings.sv_timelimit );
+	fprintf( f, "sv_warmup=%d\n",      g_settings.sv_warmup ? 1 : 0 );
+	fprintf( f, "sv_votes=%d\n",       g_settings.sv_votes ? 1 : 0 );
+	fprintf( f, "sv_itemban=%d\n",     g_settings.sv_itemban );
 	fclose( f );
 }
 
@@ -421,6 +558,7 @@ void DrawDirectoryBrowser( int win_w, int win_h )
 		g_picker.valid_pick   = ValidateResourceDir( g_picker.selected );
 		g_picker.browser_open = false;
 		RescanMods();
+		RescanNetMaps();
 	}
 	if( ImGui::Button( "Вверх", ImVec2( -1, row_h )))
 		g_picker.current_dir = ParentOf( g_picker.current_dir );
@@ -557,6 +695,114 @@ void DrawTab_Game()
 }
 
 /* ---------------------------------------------------------------------------
+ * Вкладка «Сетевая игра»: listen-сервер OpenFFA с настройками. Старт —
+ * StartNetGame(): мод openffa + флаг g_net_start, по которому при передаче
+ * управления движку выставляются env AURORA_SV_* (подхватываются в
+ * Qcommon_Init, misc.c): maxclients/fraglimit/timelimit/hostname/g_* —
+ * cvar'ами, карта — вместо штатного `d1` выполняется `deathmatch 1` +
+ * `map <карта>`. Настройки хранятся в launcher.conf (см. Load/SaveSettings).
+ * ------------------------------------------------------------------------- */
+void DrawTab_Network()
+{
+	const float fs    = ES();
+	const float btn_h = fs * 3.3f * kBtnScale;
+
+	ImGui::TextWrapped(
+		"Сервер OpenFFA (free-for-all) запускается на этом устройстве — "
+		"другие игроки в той же сети смогут подключиться к нему." );
+	ImGui::Dummy( ImVec2( 0, fs * 0.3f ));
+
+	if( !g_picker.valid_pick )
+	{
+		ImGui::TextColored( ImVec4( 0.9f, 0.7f, 0.2f, 1.f ),
+			"Сначала выберите папку с ресурсами на вкладке «Игра»." );
+	}
+
+	const bool can_start = g_picker.valid_pick;
+
+	/* Карта: список из найденных карт maps-бsp (диск + все pak'и), иначе
+	   свободный ввод имени. */
+	if( !g_net_maps.empty())
+	{
+		int cur = -1;
+		for( size_t i = 0; i < g_net_maps.size(); i++ )
+			if( g_net_maps[i] == g_settings.sv_map ) { cur = (int)i; break; }
+		const char *preview = cur >= 0 ? g_net_maps[cur].c_str()
+			: ( g_settings.sv_map.empty() ? "(выберите карту)" : g_settings.sv_map.c_str());
+		if( ImGui::BeginCombo( "Карта", preview ))
+		{
+			for( size_t i = 0; i < g_net_maps.size(); i++ )
+			{
+				const bool sel = ((int)i == cur);
+				if( ImGui::Selectable( g_net_maps[i].c_str(), sel ))
+					g_settings.sv_map = g_net_maps[i];
+				if( sel )
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+	}
+	else
+	{
+		/* Fallback: карт не нашлось — ввод имени вручную.
+		   TODO(сетевая-вкладка): на устройстве нет экранной клавиатуры
+		   в лаунчере — ввод доступен только с физической клавиатуры. */
+		char buf[64];
+		snprintf( buf, sizeof( buf ), "%s", g_settings.sv_map.c_str());
+		if( ImGui::InputText( "Карта (имя без .bsp)", buf, sizeof( buf )))
+			g_settings.sv_map = buf;
+	}
+
+	/* Имя сервера. TODO(сетевая-вкладка): то же про экранную клавиатуру —
+	   дефолт задан, поле в основном для хоста/физической клавиатуры. */
+	{
+		char buf[64];
+		snprintf( buf, sizeof( buf ), "%s", g_settings.sv_hostname.c_str());
+		if( ImGui::InputText( "Имя сервера", buf, sizeof( buf )))
+			g_settings.sv_hostname = buf;
+	}
+
+	ImGui::PushItemWidth( -fs * 6.f );
+	ImGui::SliderInt( "Игроков", &g_settings.sv_maxclients, 2, 16 );
+	ImGui::SliderInt( "Лимит фрагов", &g_settings.sv_fraglimit, 0, 100 );
+	if( g_settings.sv_fraglimit == 0 )
+		ImGui::TextDisabled( "0 = без лимита" );
+	ImGui::SliderInt( "Лимит времени (мин)", &g_settings.sv_timelimit, 0, 60 );
+	if( g_settings.sv_timelimit == 0 )
+		ImGui::TextDisabled( "0 = без лимита" );
+	ImGui::PopItemWidth();
+
+	ImGui::Checkbox( "Разминка (ready перед матчем)", &g_settings.sv_warmup );
+	ImGui::Checkbox( "Голосования (лимиты, карта)", &g_settings.sv_votes );
+
+	/* Бан предметов (g_item_ban, битмаск). */
+	{
+		int ban = g_settings.sv_itemban;
+		bool quad = ( ban & 1 ) != 0, inv = ( ban & 2 ) != 0,
+		     bfg = ( ban & 4 ) != 0, pa  = ( ban & 8 ) != 0;
+		ImGui::TextDisabled( "Убрать с карты:" );
+		if( ImGui::Checkbox( "Quad Damage", &quad )) ban ^= 1;
+		ImGui::SameLine();
+		if( ImGui::Checkbox( "Invulnerability", &inv )) ban ^= 2;
+		if( ImGui::Checkbox( "BFG10K", &bfg )) ban ^= 4;
+		ImGui::SameLine();
+		if( ImGui::Checkbox( "Power Armor", &pa )) ban ^= 8;
+		g_settings.sv_itemban = ban & 15;
+	}
+
+	ImGui::Spacing();
+	ImGui::BeginDisabled( !can_start );
+	if( ImGui::Button( "Старт сетевой игры", ImVec2( -1, btn_h )))
+	{
+		g_settings.sv_map = SanitizeMapName( g_settings.sv_map );
+		g_launch     = true;
+		g_launch_mod = "openffa";
+		g_net_start  = true;
+	}
+	ImGui::EndDisabled();
+}
+
+/* ---------------------------------------------------------------------------
  * Вкладка «Настройки».
  * ------------------------------------------------------------------------- */
 void DrawTab_Settings()
@@ -652,16 +898,18 @@ struct TabIcon
 	const char *file;
 	GLuint      tex; /* 0 — не загружена */
 };
-static TabIcon g_tabIcons[3] =
+#define TAB_COUNT 4
+static TabIcon g_tabIcons[TAB_COUNT] =
 {
-	{ "game.png",     0 },
-	{ "settings.png", 0 },
-	{ "about.png",    0 },
+	{ "game.png",          0 },
+	{ "network_game.png",  0 },
+	{ "settings.png",      0 },
+	{ "about.png",         0 },
 };
 
 void LoadTabIcons()
 {
-	for( int i = 0; i < 3; i++ )
+	for( int i = 0; i < TAB_COUNT; i++ )
 	{
 		/* Путь установки пакета; для запуска из корня репо — ./resources. */
 		std::string path = std::string( "/usr/share/" AURORA_ORG "." AURORA_APP
@@ -727,7 +975,10 @@ int g_active_tab = 0;
 
 void DrawTabsRow()
 {
-	static const char *names[] = { "Игра", "Настройки", "О программе" };
+	static const char *names[TAB_COUNT] =
+	{
+		"Игра", "Сетевая игра", "Настройки", "О программе"
+	};
 	const float fs       = ES();
 	const float tab_h    = fs * 2.6f * kTabScale;
 	const float gap      = fs * 0.4f;
@@ -742,9 +993,9 @@ void DrawTabsRow()
 	/* Адаптив: либо «иконка+надпись» на ВСЕХ вкладках, либо иконки без
 	   надписей на всех. Ширины содержимого считаем каждый кадр (дёшево,
 	   корректно при повороте/ресайзе). */
-	float content_w[3], text_w[3];
-	float total = gap * 2.f;
-	for( int i = 0; i < 3; i++ )
+	float content_w[TAB_COUNT], text_w[TAB_COUNT];
+	float total = gap * ( TAB_COUNT - 1 );
+	for( int i = 0; i < TAB_COUNT; i++ )
 	{
 		text_w[i]     = ImGui::CalcTextSize( names[i] ).x;
 		const bool icon = g_tabIcons[i].tex != 0;
@@ -755,8 +1006,8 @@ void DrawTabsRow()
 	const bool labels = total <= avail;
 	if( !labels )
 	{
-		total = gap * 2.f;
-		for( int i = 0; i < 3; i++ )
+		total = gap * ( TAB_COUNT - 1 );
+		for( int i = 0; i < TAB_COUNT; i++ )
 		{
 			const bool icon = g_tabIcons[i].tex != 0;
 			content_w[i] = inner_pad * 2.f
@@ -775,7 +1026,7 @@ void DrawTabsRow()
 	const float  line_h   = ImGui::GetTextLineHeight();
 
 	ImDrawList *dl = ImGui::GetWindowDrawList();
-	for( int i = 0; i < 3; i++ )
+	for( int i = 0; i < TAB_COUNT; i++ )
 	{
 		if( i > 0 )
 			ImGui::SameLine( 0.f, gap );
@@ -865,7 +1116,8 @@ void DrawLauncherUI( bool &user_quit, int win_w, int win_h )
 	switch( g_active_tab )
 	{
 	case 0:  DrawTab_Game();     break;
-	case 1:  DrawTab_Settings(); break;
+	case 1:  DrawTab_Network();  break;
+	case 2:  DrawTab_Settings(); break;
 	default: DrawTab_About();    break;
 	}
 
@@ -1085,6 +1337,7 @@ extern "C" int Launcher_Run( void )
 			g_picker.valid_pick = true;
 		}
 		RescanMods();
+		RescanNetMaps();
 	}
 
 	bool user_quit = false;
@@ -1145,6 +1398,25 @@ extern "C" int Launcher_Run( void )
 		   FS_AddGameDirectories и RFBO_Init). */
 		setenv( "AURORA_RESDIR",   g_picker.selected.c_str(), 1 );
 		setenv( "AURORA_GAME_MOD", g_launch_mod.c_str(),      1 );
+		if( g_net_start )
+		{
+			/* Настройки listen-сервера вкладки «Сетевая игра»
+			   (подхватываются в Qcommon_Init, misc.c). Имя карты
+			   валидировано SanitizeMapName ([A-Za-z0-9_-]). */
+			char num[32];
+			setenv( "AURORA_SV_MAP",      g_settings.sv_map.c_str(),      1 );
+			setenv( "AURORA_SV_HOSTNAME", g_settings.sv_hostname.c_str(), 1 );
+			snprintf( num, sizeof( num ), "%d", g_settings.sv_maxclients );
+			setenv( "AURORA_SV_MAXCLIENTS", num, 1 );
+			snprintf( num, sizeof( num ), "%d", g_settings.sv_fraglimit );
+			setenv( "AURORA_SV_FRAGLIMIT", num, 1 );
+			snprintf( num, sizeof( num ), "%d", g_settings.sv_timelimit );
+			setenv( "AURORA_SV_TIMELIMIT", num, 1 );
+			setenv( "AURORA_SV_WARMUP",   g_settings.sv_warmup ? "1" : "0", 1 );
+			setenv( "AURORA_SV_VOTEMASK", g_settings.sv_votes ? "35" : "0",  1 );
+			snprintf( num, sizeof( num ), "%d", g_settings.sv_itemban );
+			setenv( "AURORA_SV_ITEMBAN", num, 1 );
+		}
 		char scale_buf[32];
 		snprintf( scale_buf, sizeof( scale_buf ), "%.3f", g_settings.r_3d_scale );
 		setenv( "AURORA_R_3D_SCALE", scale_buf, 1 );

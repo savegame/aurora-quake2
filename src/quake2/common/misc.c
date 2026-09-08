@@ -232,6 +232,29 @@ static void Qcommon_Init(int argc, char **argv)
 		if (mod != NULL && mod[0] != '\0')
 			Cvar_Get("game", mod, CVAR_LATCH | CVAR_SERVERINFO);
 	}
+
+	/* Параметры listen-сервера из лаунчера (вкладка «Сетевая игра»).
+	   Регистрируем до FS/SV, флаги совпадают со штатной регистрацией
+	   (sv_main.c), чтобы значения не затирались; g_warmup/g_vote_mask/
+	   g_item_ban — cvar'ы игровой библиотеки OpenFFA, ранний Cvar_Get
+	   с флагами 0 безвреден: значение сохранится. */
+	{
+		char *v;
+		if ((v = getenv("AURORA_SV_MAXCLIENTS")) != NULL && v[0] != '\0')
+			Cvar_Get("maxclients", v, CVAR_SERVERINFO | CVAR_LATCH);
+		if ((v = getenv("AURORA_SV_FRAGLIMIT")) != NULL && v[0] != '\0')
+			Cvar_Get("fraglimit", v, CVAR_SERVERINFO);
+		if ((v = getenv("AURORA_SV_TIMELIMIT")) != NULL && v[0] != '\0')
+			Cvar_Get("timelimit", v, CVAR_SERVERINFO);
+		if ((v = getenv("AURORA_SV_HOSTNAME")) != NULL && v[0] != '\0')
+			Cvar_Get("hostname", v, CVAR_SERVERINFO | CVAR_ARCHIVE);
+		if ((v = getenv("AURORA_SV_WARMUP")) != NULL && v[0] != '\0')
+			Cvar_Get("g_warmup", v, 0);
+		if ((v = getenv("AURORA_SV_VOTEMASK")) != NULL && v[0] != '\0')
+			Cvar_Get("g_vote_mask", v, 0);
+		if ((v = getenv("AURORA_SV_ITEMBAN")) != NULL && v[0] != '\0')
+			Cvar_Get("g_item_ban", v, 0);
+	}
 #endif
 
 	#ifndef DEDICATED_ONLY
@@ -295,10 +318,23 @@ static void Qcommon_Init(int argc, char **argv)
 	if (!Cbuf_AddLateCommands())
 	{
 		/* if the user didn't give any commands, run default action */
+#if defined(AURORA_OS)
+		/* Старт listen-сервера OpenFFA из лаунчера: deathmatch 1 + map.
+		   Имя карты валидировано лаунчером ([A-Za-z0-9_-]). */
+		{
+			char *svmap = getenv("AURORA_SV_MAP");
+
+			if (svmap != NULL && svmap[0] != '\0')
+				Cbuf_AddText(va("set deathmatch 1\nmap %s\n", svmap));
+			else
+#endif
 		if (!dedicated->value)
 			Cbuf_AddText("d1\n");
 		else
 			Cbuf_AddText("dedicated_start\n");
+#if defined(AURORA_OS)
+		}
+#endif
 
 		Cbuf_Execute();
 	}
