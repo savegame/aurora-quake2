@@ -65,6 +65,28 @@ static int l_mouseOldX, l_mouseOldY;
 static SDL_Joystick *l_joystick = NULL;
 static SDL_GameController *l_controller = NULL;
 
+#if defined(AURORA_OS)
+/* Подключён ли геймпад, открытый как SDL_GameController (extern в
+   backends/input.h) — тач-UI может по нему прятать экранный оверлей. */
+qboolean aurora_gamepad_present = false;
+
+/* SDL продолжает слать JOYBUTTON/JOYHAT-события для устройства,
+   открытого как SDL_GameController, — если скормить в движок обе семьи,
+   каждое нажатие регистрируется дважды (B20). JOY-события от instance id
+   открытого контроллера игнорируем; устройства без controller-маппинга
+   (l_controller == NULL или другой instance id) работают через JOY-путь. */
+static bool IN_AuroraJoystickIsController(SDL_JoystickID which)
+{
+	if (!l_controller)
+		return false;
+	return SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(l_controller)) == which;
+}
+#endif
+
+/* (Отладочная диагностика геймпада GUID/mapping/сырой JOY-путь удалена
+   2026-09-08 по фидбеку пользователя — спамила лог. Одноразовые
+   «Gamepad connected/disconnected» оставлены.) */
+
 static int IN_TranslateSDLtoQ2Key(Sint32 keysym)
 {
 	int key;
@@ -471,17 +493,23 @@ bool IN_processEvent(SDL_Event *event)
 		break;
 #endif
 
-	case SDL_JOYAXISMOTION:
-		break;
 	case SDL_JOYBUTTONDOWN:
 	case SDL_JOYBUTTONUP:
 	{
+#if defined(AURORA_OS)
+		if (IN_AuroraJoystickIsController(event->jbutton.which))
+			break; /* дубль: кнопку отдаст опрос в IN_PollControllerButtons */
+#endif
 		bool down = (event->type == SDL_JOYBUTTONDOWN);
 		Key_Event(K_JOY1 + event->jbutton.button, down);
 	}
 	break;
 	case SDL_JOYHATMOTION:
 	{
+#if defined(AURORA_OS)
+		if (IN_AuroraJoystickIsController(event->jhat.which))
+			break; /* дубль: D-pad опрашивается в IN_PollControllerButtons */
+#endif
 		int v = event->jhat.value;
 		bool left = (v == SDL_HAT_LEFTDOWN || v == SDL_HAT_LEFT || v == SDL_HAT_LEFTUP);
 		bool right = (v == SDL_HAT_RIGHTDOWN || v == SDL_HAT_RIGHT || v == SDL_HAT_RIGHTUP);
@@ -501,7 +529,12 @@ bool IN_processEvent(SDL_Event *event)
 		{
 			l_controller = SDL_GameControllerOpen(device_index);
 			if (l_controller)
+			{
 				Com_Printf("Gamepad connected: %s\n", SDL_GameControllerName(l_controller));
+#if defined(AURORA_OS)
+				aurora_gamepad_present = true;
+#endif
+			}
 			else
 				R_printf(PRINT_ALL, "Could not open gamecontroller %i: %s\n", device_index, SDL_GetError());
 		}
@@ -516,71 +549,210 @@ bool IN_processEvent(SDL_Event *event)
 			Com_Printf("Gamepad disconnected: %s\n", name ? name : "unknown");
 			SDL_GameControllerClose(l_controller);
 			l_controller = NULL;
+#if defined(AURORA_OS)
+			aurora_gamepad_present = false;
+#endif
 		}
 	}
 	break;
 
 	case SDL_CONTROLLERAXISMOTION:
-	{
-		/* Триггеры на SDL_GameController API — аналоговые оси, а не
-		   кнопки. Порог по середине хода даёт дискретное нажатие
-		   для K_GAMEPAD_L/RTRIGGER, с гистерезисом по предыдущему
-		   состоянию (иначе Key_Event слался бы на каждое дрожание
-		   около порога). */
-		static bool leftTriggerDown = false;
-		static bool rightTriggerDown = false;
-		const Sint16 triggerThreshold = 16384; /* половина хода оси [0, 32767] */
-
-		if (event->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT)
-		{
-			bool down = event->caxis.value > triggerThreshold;
-			if (down != leftTriggerDown)
-			{
-				leftTriggerDown = down;
-				Key_Event(K_GAMEPAD_LTRIGGER, down);
-			}
-		}
-		else if (event->caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-		{
-			bool down = event->caxis.value > triggerThreshold;
-			if (down != rightTriggerDown)
-			{
-				rightTriggerDown = down;
-				Key_Event(K_GAMEPAD_RTRIGGER, down);
-			}
-		}
-	}
-	break;
+		/* Подтверждено логом с устройства (8BitDo Lite 2, наша сборка
+		   SDL2): это событие НЕ приходит вообще — вместо него летит
+		   легаси SDL_JOYAXISMOTION, хотя контроллер успешно открыт через
+		   SDL_GameControllerOpen. Кнопки/триггеры поэтому опрашиваются по
+		   состоянию каждый кадр в IN_PollControllerButtons (вызывается из
+		   IN_Update), а не по этому событию. Стики для движения/камеры и
+		   раньше не зависели от событий — IN_Move тоже опрашивает
+		   SDL_GameControllerGetAxis напрямую. Кейс оставлен пустым на
+		   случай, если SDL когда-нибудь начнёт слать его для этого
+		   драйвера/устройства. */
+		break;
 	case SDL_CONTROLLERBUTTONDOWN:
 	case SDL_CONTROLLERBUTTONUP:
-	{
-		bool down = (event->type == SDL_CONTROLLERBUTTONDOWN);
-		int key;
-		switch (event->cbutton.button)
-		{
-		default: key = -1; break;
-		case SDL_CONTROLLER_BUTTON_A: key = K_GAMEPAD_A; break;
-		case SDL_CONTROLLER_BUTTON_B: key = K_GAMEPAD_B; break;
-		case SDL_CONTROLLER_BUTTON_X: key = K_GAMEPAD_X; break;
-		case SDL_CONTROLLER_BUTTON_Y: key = K_GAMEPAD_Y; break;
-		case SDL_CONTROLLER_BUTTON_BACK: key = K_GAMEPAD_SELECT; break;
-		case SDL_CONTROLLER_BUTTON_GUIDE: key = K_GAMEPAD_SELECT; break;
-		case SDL_CONTROLLER_BUTTON_START: key = K_GAMEPAD_START; break;
-		case SDL_CONTROLLER_BUTTON_LEFTSTICK: key = K_GAMEPAD_LSTICK; break;
-		case SDL_CONTROLLER_BUTTON_RIGHTSTICK: key = K_GAMEPAD_RSTICK; break;
-		case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: key = K_GAMEPAD_L; break;
-		case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: key = K_GAMEPAD_R; break;
-		case SDL_CONTROLLER_BUTTON_DPAD_UP: key = K_GAMEPAD_UP; break;
-		case SDL_CONTROLLER_BUTTON_DPAD_DOWN: key = K_GAMEPAD_DOWN; break;
-		case SDL_CONTROLLER_BUTTON_DPAD_LEFT: key = K_GAMEPAD_LEFT; break;
-		case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: key = K_GAMEPAD_RIGHT; break;
-		}
-		if (key >= 0)
-			Key_Event(key, down);
-	}
-	break;
+		/* См. комментарий у SDL_CONTROLLERAXISMOTION — тоже не приходит
+		   для этого контроллера, обработка перенесена в опрос по кадрам. */
+		break;
 	}
 	return true;
+}
+
+#if defined(AURORA_OS)
+/* Левый стик в меню — навигация курсором и изменение параметров
+   (слайдеры влево/вправо), как D-pad: стик превращается в события
+   K_GAMEPAD_UP/DOWN/LEFT/RIGHT с автоповтором при удержании. В игре
+   левый стик читает IN_Move напрямую, поэтому здесь работаем только
+   в key_menu. Порог — сырое значение оси SDL. */
+#define AURORA_MENU_STICK_THRESHOLD 16000
+#define AURORA_MENU_STICK_DELAY 400    /* мс до начала автоповтора */
+#define AURORA_MENU_STICK_REPEAT 150   /* мс между повторами */
+
+static void IN_AuroraMenuStickNav(void)
+{
+	static struct
+	{
+		SDL_GameControllerAxis axis;
+		int negKey, posKey;
+		int dir;              /* -1/0/+1 — текущее удерживаемое направление */
+		unsigned nextRepeat;  /* момент следующего автоповтора */
+	} stickNav[2] =
+	{
+		{ SDL_CONTROLLER_AXIS_LEFTX, K_GAMEPAD_LEFT, K_GAMEPAD_RIGHT, 0, 0 },
+		{ SDL_CONTROLLER_AXIS_LEFTY, K_GAMEPAD_UP,   K_GAMEPAD_DOWN,  0, 0 },
+	};
+
+	if (cls.key_dest != key_menu)
+	{
+		/* Вышли из меню с отклонённым стиком — отпускаем клавиши. */
+		for (int i = 0; i < 2; i++)
+		{
+			if (stickNav[i].dir != 0)
+			{
+				Key_Event(stickNav[i].dir < 0 ? stickNav[i].negKey : stickNav[i].posKey, false);
+				stickNav[i].dir = 0;
+			}
+		}
+		return;
+	}
+
+	unsigned now = Sys_Milliseconds();
+	for (int i = 0; i < 2; i++)
+	{
+		Sint16 v = SDL_GameControllerGetAxis(l_controller, stickNav[i].axis);
+		int dir = (v > AURORA_MENU_STICK_THRESHOLD) ? 1 :
+			(v < -AURORA_MENU_STICK_THRESHOLD) ? -1 : 0;
+
+		if (dir != stickNav[i].dir)
+		{
+			if (stickNav[i].dir != 0)
+				Key_Event(stickNav[i].dir < 0 ? stickNav[i].negKey : stickNav[i].posKey, false);
+			if (dir != 0)
+			{
+				Key_Event(dir < 0 ? stickNav[i].negKey : stickNav[i].posKey, true);
+				stickNav[i].nextRepeat = now + AURORA_MENU_STICK_DELAY;
+			}
+			stickNav[i].dir = dir;
+		}
+		else if (dir != 0 && now >= stickNav[i].nextRepeat)
+		{
+			/* Автоповтор: отпускаем и жмём заново — меню делает ещё шаг. */
+			int key = dir < 0 ? stickNav[i].negKey : stickNav[i].posKey;
+			Key_Event(key, false);
+			Key_Event(key, true);
+			stickNav[i].nextRepeat = now + AURORA_MENU_STICK_REPEAT;
+		}
+	}
+}
+#endif
+
+#if defined(AURORA_OS)
+/* Контекстный ремап кнопок геймпада. K_GAMEPAD_A/B — это ASCII 'A'/'B'
+   (keyboard.h), Key_isSpecial считает их печатными символами, и в меню они
+   тонут в Char_Event, не доходя до M_Keydown (нативные case'ы A/B в menu.c
+   из-за этого фактически мёртвы). Поэтому в key_menu шлём сразу K_ENTER
+   (A — активация) / K_ESCAPE (B и START — «назад», M_PopMenu; на верхнем
+   уровне меню ESCAPE возвращает в игру). START в key_game — тоже K_ESCAPE
+   (открыть меню, штатный путь Key_Event → MenuMain_enter; бинд START из
+   platform.cfg убран, иначе перекрывал). При key_console ремап НЕ применяем
+   (геймпад там не печатает). */
+static int IN_AuroraRemapGamepadKey(int key)
+{
+	if (cls.key_dest == key_menu)
+	{
+		if (key == K_GAMEPAD_A)
+			return K_ENTER;
+		if (key == K_GAMEPAD_B || key == K_GAMEPAD_START)
+			return K_ESCAPE;
+	}
+	else if (cls.key_dest == key_game && key == K_GAMEPAD_START)
+	{
+		return K_ESCAPE;
+	}
+	return key;
+}
+#endif
+
+/* Кнопки и триггеры геймпада — по опросу состояния каждый кадр, а не по
+   SDL_CONTROLLERBUTTONDOWN/UP/AXISMOTION: на нашей сборке SDL2 эти события
+   для геймпада (проверено на 8BitDo Lite 2) не приходят вовсе, хотя
+   SDL_GameControllerGetButton/GetAxis исправно отдают актуальное состояние
+   (как и оси стиков в IN_Move, которые по той же причине опрашиваются,
+   а не ждут событий). */
+static void IN_PollControllerButtons()
+{
+	if (l_controller == NULL)
+		return;
+
+	static const struct { SDL_GameControllerButton sdlButton; int key; } buttonMap[] =
+	{
+		{ SDL_CONTROLLER_BUTTON_A, K_GAMEPAD_A },
+		{ SDL_CONTROLLER_BUTTON_B, K_GAMEPAD_B },
+		{ SDL_CONTROLLER_BUTTON_X, K_GAMEPAD_X },
+		{ SDL_CONTROLLER_BUTTON_Y, K_GAMEPAD_Y },
+#if defined(AURORA_OS)
+		/* SELECT/BACK = F1 (help computer), раскладка пользователя. */
+		{ SDL_CONTROLLER_BUTTON_BACK, K_F1 },
+		{ SDL_CONTROLLER_BUTTON_GUIDE, K_F1 },
+#else
+		{ SDL_CONTROLLER_BUTTON_BACK, K_GAMEPAD_SELECT },
+		{ SDL_CONTROLLER_BUTTON_GUIDE, K_GAMEPAD_SELECT },
+#endif
+		{ SDL_CONTROLLER_BUTTON_START, K_GAMEPAD_START },
+		{ SDL_CONTROLLER_BUTTON_LEFTSTICK, K_GAMEPAD_LSTICK },
+		{ SDL_CONTROLLER_BUTTON_RIGHTSTICK, K_GAMEPAD_RSTICK },
+		{ SDL_CONTROLLER_BUTTON_LEFTSHOULDER, K_GAMEPAD_L },
+		{ SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, K_GAMEPAD_R },
+		{ SDL_CONTROLLER_BUTTON_DPAD_UP, K_GAMEPAD_UP },
+		{ SDL_CONTROLLER_BUTTON_DPAD_DOWN, K_GAMEPAD_DOWN },
+		{ SDL_CONTROLLER_BUTTON_DPAD_LEFT, K_GAMEPAD_LEFT },
+		{ SDL_CONTROLLER_BUTTON_DPAD_RIGHT, K_GAMEPAD_RIGHT },
+	};
+	static bool lastButtonState[SDL_CONTROLLER_BUTTON_MAX];
+#if defined(AURORA_OS)
+	/* Отпускание идёт той клавишей, что была отправлена на нажатии:
+	   контекст (меню/игра) за время удержания мог смениться. */
+	static int lastSentKey[SDL_CONTROLLER_BUTTON_MAX];
+#endif
+
+	for (size_t i = 0; i < sizeof(buttonMap) / sizeof(buttonMap[0]); i++)
+	{
+		SDL_GameControllerButton sdlButton = buttonMap[i].sdlButton;
+		bool down = SDL_GameControllerGetButton(l_controller, sdlButton) != 0;
+		if (down != lastButtonState[sdlButton])
+		{
+			lastButtonState[sdlButton] = down;
+#if defined(AURORA_OS)
+			int key = down ? IN_AuroraRemapGamepadKey(buttonMap[i].key)
+			               : lastSentKey[sdlButton];
+			lastSentKey[sdlButton] = key;
+			Key_Event(key, down);
+#else
+			Key_Event(buttonMap[i].key, down);
+#endif
+		}
+	}
+
+	static bool leftTriggerDown = false;
+	static bool rightTriggerDown = false;
+	const Sint16 triggerThreshold = 16384; /* половина хода оси [0, 32767] */
+
+	bool lt = SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > triggerThreshold;
+	if (lt != leftTriggerDown)
+	{
+		leftTriggerDown = lt;
+		Key_Event(K_GAMEPAD_LTRIGGER, lt);
+	}
+
+	bool rt = SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > triggerThreshold;
+	if (rt != rightTriggerDown)
+	{
+		rightTriggerDown = rt;
+		Key_Event(K_GAMEPAD_RTRIGGER, rt);
+	}
+
+#if defined(AURORA_OS)
+	IN_AuroraMenuStickNav();
+#endif
 }
 
 /*
@@ -591,6 +763,7 @@ bool IN_processEvent(SDL_Event *event)
 void IN_Update()
 {
 	sdlwCheckEvents();
+	IN_PollControllerButtons();
 
 #if defined(AURORA_OS)
 	Touch_Frame();
@@ -687,6 +860,20 @@ void IN_Move(usercmd_t *cmd)
 
     float joyXFloat = 0.0f, joyYFloat = 0.0f;
 
+#if defined(AURORA_OS)
+    if (l_joystick != NULL && stick_enabled->value)
+    {
+        /* Устройство без controller-маппинга (сырой JOY-путь): тот же
+           расклад, что и у контроллера — левый стик (оси 0/1) = движение,
+           вверх = вперёд (Y инвертирован, как у контроллера ниже). */
+        float joyX = (float)SDL_JoystickGetAxis(l_joystick, 0) / 32768.0f;
+        float joyY = (float)SDL_JoystickGetAxis(l_joystick, 1) / 32768.0f;
+        joyX = ComputeStickValue(joyX);
+        joyY = ComputeStickValue(joyY);
+        cmd->sidemove += cl_speed_side->value * joyX * running;
+        cmd->forwardmove += cl_speed_forward->value * -joyY * running;
+    }
+#else
     if (l_joystick != NULL && stick_enabled->value)
     {
         float joyX, joyY;
@@ -695,22 +882,30 @@ void IN_Move(usercmd_t *cmd)
         joyXFloat = ComputeStickValue(joyX);
         joyYFloat = ComputeStickValue(joyY);
     }
+#endif
 
     if (l_controller != NULL)
     {
         float joyX, joyY;
 
-        joyX = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_LEFTX) / 32768.0f;;
-        joyY = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_LEFTY) / 32768.0f;;
-        joyXFloat += ComputeStickValue(joyX);
-        joyYFloat += ComputeStickValue(joyY);
-
-        joyX = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32768.0f;;
-        joyY = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32768.0f;;
+        /* Левый стик — движение (как левая половина тач-стика), правый —
+           камера (joyXFloat/joyYFloat ниже уходят в yaw/pitch). Раньше
+           было наоборот (унаследовано от исходного движка) — не совпадало
+           с раскладкой из platform.cfg и с тач-UI. */
+        joyX = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_LEFTX) / 32768.0f;
+        joyY = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_LEFTY) / 32768.0f;
         joyX = ComputeStickValue(joyX);
         joyY = ComputeStickValue(joyY);
         cmd->sidemove += cl_speed_side->value * joyX * running;
-        cmd->forwardmove += cl_speed_forward->value * joyY * running;
+        /* SDL: стик вперёд (от себя) = отрицательный Y (как экранные
+           координаты); в Q2 вперёд = положительный forwardmove — знак
+           инвертируем (аналогично мыши: forwardDelta = -mouse_speed*mouseY). */
+        cmd->forwardmove += cl_speed_forward->value * -joyY * running;
+
+        joyX = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32768.0f;
+        joyY = (float)SDL_GameControllerGetAxis(l_controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32768.0f;
+        joyXFloat += ComputeStickValue(joyX);
+        joyYFloat += ComputeStickValue(joyY);
     }
 
 #if defined(AURORA_OS)
@@ -776,7 +971,11 @@ void IN_Init()
 	mouse_speed_side = Cvar_Get("mouse_speed_side", "0.8", CVAR_ARCHIVE);
 	mouse_speed_yaw = Cvar_Get("mouse_speed_yaw", "0.022", CVAR_ARCHIVE);
     
-	#if defined(__unix__) && !defined(__GCW_ZERO__)
+	#if defined(AURORA_OS)
+	// На Авроре сырой JOY-путь — единственный для устройств без маппинга,
+	// пусть работает из коробки.
+	stick_enabled = Cvar_Get("stick_enabled", "1", CVAR_ARCHIVE);
+	#elif defined(__unix__) && !defined(__GCW_ZERO__)
 	// There is some issues with the l_joystick under Linux. So disable it by default (it works for GCW Zero and it is needed for this platform).
 	stick_enabled = Cvar_Get("stick_enabled", "0", CVAR_ARCHIVE);
 	#else
@@ -804,7 +1003,7 @@ void IN_Init()
 
 	if (!SDL_WasInit(SDL_INIT_JOYSTICK))
 	{
-		if (SDL_Init(SDL_INIT_JOYSTICK) == -1)
+		if (SDL_Init(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) == -1)
 		{
 			R_printf(PRINT_ALL, "Couldn't init SDL l_joystick: %s.\n", SDL_GetError());
 		}
@@ -834,6 +1033,9 @@ void IN_Init()
 							else
 							{
 								Com_Printf("Gamepad connected: %s\n", SDL_GameControllerName(l_controller));
+#if defined(AURORA_OS)
+								aurora_gamepad_present = true;
+#endif
 							}
 						}
 					}
@@ -866,14 +1068,22 @@ void IN_Shutdown()
 	Cmd_RemoveCommand("+mlook");
 	Cmd_RemoveCommand("-mlook");
 
-	if (SDL_WasInit(SDL_INIT_JOYSTICK))
+	if (SDL_WasInit(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER))
 	{
-		if (SDL_JoystickGetAttached(l_joystick))
+		if (l_controller)
+		{
+			SDL_GameControllerClose(l_controller);
+			l_controller = NULL;
+#if defined(AURORA_OS)
+			aurora_gamepad_present = false;
+#endif
+		}
+		if (l_joystick && SDL_JoystickGetAttached(l_joystick))
 		{
 			SDL_JoystickClose(l_joystick);
 			l_joystick = NULL;
 		}
-		SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
+		SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER);
 	}
 
 	Com_Printf("Shutting down input.\n");
