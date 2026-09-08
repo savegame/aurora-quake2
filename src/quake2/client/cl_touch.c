@@ -629,6 +629,27 @@ static void Touch_StickStop(void)
 	IN_SetTouchStick(0.0f, 0.0f);
 }
 
+/* Отпустить всё зажатое тачем: кнопки (со своими up-командами, чтобы не
+   осталось «залипшего» +attack и т.п.), стик, тачпад. Без hit-test'ов —
+   для смены контекста и скрытия оверлея под геймпадом. */
+static void Touch_ReleaseAll(void)
+{
+	for (int i = 0; i < (int)TOUCH_NUM_BUTTONS; i++)
+		Touch_Release(&touchButtons[i]);
+	Touch_StickStop();
+	lookActive = false;
+}
+
+/* Геймпад подключён (aurora_gamepad_present, input_sdl.c) — тач-оверлей
+   (кнопки/стик/тачпад, включая меню) скрываем: геймпад полностью заменяет
+   сенсорное управление, а «невидимые» кнопки не должны перехватывать
+   пальцы. Исключение — экранная клавиатура при запрошенном вводе текста:
+   печатать с геймпада нечем. */
+static bool Touch_GamepadHidden(int context)
+{
+	return aurora_gamepad_present && context != TBF_KEYBOARD;
+}
+
 static void Touch_StickUpdate(float x, float y)
 {
 	/* Ручка рисуется прямо под пальцем (без клампа), кламп — только
@@ -660,6 +681,11 @@ static void Touch_StickUpdate(float x, float y)
 
 void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y)
 {
+	/* Геймпад заменяет тач-оверлей: пока он подключён, кнопки/стик/тачпад
+	   не обрабатываем (клавиатура — исключение, см. Touch_GamepadHidden). */
+	if (Touch_GamepadHidden(Touch_Context()))
+		return;
+
 	Touch_Layout();
 	int context = Touch_Context();
 
@@ -753,6 +779,19 @@ void Touch_FingerEvent(int sdlEventType, long long fingerId, float x, float y)
 void Touch_Frame(void)
 {
 	int context = Touch_Context();
+
+	/* Геймпад скрыл оверлей: hit-test в FingerEvent отключён, новых нажатий
+	   быть не должно — на переходе отпускаем всё зажатое пальцем (иначе
+	   останутся «залипшие» +attack/стик), дальше только клавиатура текста. */
+	static bool wasHidden = false;
+	if (Touch_GamepadHidden(context))
+	{
+		if (!wasHidden)
+			Touch_ReleaseAll();
+		wasHidden = true;
+		return;
+	}
+	wasHidden = false;
 
 	/* Меню/игру закрыли с зажатым пальцем — отпустить все кнопки. */
 	if (context == 0)
@@ -908,6 +947,11 @@ void Touch_DrawOverlay(void)
 {
 	int context = Touch_Context();
 	if (context == 0)
+		return;
+
+	/* Геймпад заменяет тач-оверлей — ничего не рисуем (клавиатура текста,
+	   когда запрошен ввод, — исключение). */
+	if (Touch_GamepadHidden(context))
 		return;
 
 	Touch_Layout();
