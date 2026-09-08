@@ -57,4 +57,9 @@ void IN_Update();
 void IN_AddTouchLook(float dx, float dy);
 void IN_SetTouchStick(float x, float y);
 
+#if defined(AURORA_OS)
+/* Подключён ли геймпад (открыт как SDL_GameController, input_sdl.c). */
+extern qboolean aurora_gamepad_present;
+#endif
+
 #endif
