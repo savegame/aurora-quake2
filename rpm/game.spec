@@ -82,6 +82,9 @@ install -m 644 -D platform.cfg %{buildroot}%{_datadir}/%{name}/baseq2/platform.c
 # Gamepad mappings database (SDL_GameControllerDB), read at gamepad init
 install -m 644 -D gamecontrollerdb.txt %{buildroot}%{_datadir}/%{name}/gamecontrollerdb.txt
 
+# Launcher tab icons
+install -m 644 -D resources/*.png -t %{buildroot}%{_datadir}/%{name}/resources
+
 # Icons
 install -m 644 -D icons/86.png  %{buildroot}%{_datadir}/icons/hicolor/86x86/apps/%{name}.png
 install -m 644 -D icons/108.png %{buildroot}%{_datadir}/icons/hicolor/108x108/apps/%{name}.png

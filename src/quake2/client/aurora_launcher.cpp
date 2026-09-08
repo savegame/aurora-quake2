@@ -29,6 +29,11 @@ extern "C" {
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 
+/* Декодирование PNG иконок вкладок — stb_image уже в движке (stb.c
+   собирает его с STB_IMAGE_IMPLEMENTATION в таргет quake2) — берём только
+   декларации. */
+#include "client/refresh/files/stb_image.h"
+
 #include <GLES2/gl2.h>
 
 #include <SDL_misc.h> /* SDL_OpenURL */
@@ -636,9 +641,87 @@ void DrawTab_About()
 }
 
 /* ---------------------------------------------------------------------------
- * Строка вкладок: кастомные кнопки в стиле темы (стандартный TabBar imgui
- * синий и сюда не вписывается), скругление только сверху. Сама строка
- * фиксирована — прокручивается только контент под ней.
+ * Иконки вкладок: PNG из <datadir>/resources (ставятся пакетом). Иконки
+ * чёрные: тинт у ImGui::Image МНОЖИТ rgb-текстуру, поэтому чёрное им не
+ * перекрасить — при загрузке силуэт отбеливаем (видимую форму задаёт
+ * альфа), а цвет даём тинтом в цвет текста темы при отрисовке. Не
+ * декодировалось — вкладка рисуется одним текстом, как раньше.
+ * ------------------------------------------------------------------------- */
+struct TabIcon
+{
+	const char *file;
+	GLuint      tex; /* 0 — не загружена */
+};
+static TabIcon g_tabIcons[3] =
+{
+	{ "game.png",     0 },
+	{ "settings.png", 0 },
+	{ "about.png",    0 },
+};
+
+void LoadTabIcons()
+{
+	for( int i = 0; i < 3; i++ )
+	{
+		/* Путь установки пакета; для запуска из корня репо — ./resources. */
+		std::string path = std::string( "/usr/share/" AURORA_ORG "." AURORA_APP
+				"/resources/" ) + g_tabIcons[i].file;
+		int w = 0, h = 0;
+		unsigned char *px = stbi_load( path.c_str(), &w, &h, nullptr, 4 );
+		if( px == nullptr )
+			px = stbi_load( ( "./resources/" + std::string( g_tabIcons[i].file )).c_str(),
+				&w, &h, nullptr, 4 );
+		if( px == nullptr )
+		{
+			printf( "Launcher: иконка вкладки '%s' не загружена (%s)\n",
+				g_tabIcons[i].file, stbi_failure_reason() );
+			continue;
+		}
+
+		/* Чёрный силуэт -> белый: при отрисовке тинт в цвет текста. */
+		for( long n = 0; n < (long)w * h; n++ )
+		{
+			if( px[n * 4 + 3] != 0 )
+			{
+				px[n * 4 + 0] = 255;
+				px[n * 4 + 1] = 255;
+				px[n * 4 + 2] = 255;
+			}
+		}
+
+		GLuint tex = 0;
+		glGenTextures( 1, &tex );
+		glBindTexture( GL_TEXTURE_2D, tex );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+		glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
+		glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px );
+		glBindTexture( GL_TEXTURE_2D, 0 );
+		stbi_image_free( px );
+		g_tabIcons[i].tex = tex;
+		printf( "Launcher: иконка вкладки '%s' (%dx%d)\n", g_tabIcons[i].file, w, h );
+	}
+}
+
+/* Текстуры иконок освобождаем ДО выгрузки imgui/бэкенда, пока GL-контекст
+   жив: движок после лаунчера самоназначает id текстур и не должен получить
+   занятые нами (атлас шрифта imgui — фиксированный 65000, не пересекаемся). */
+void FreeTabIcons()
+{
+	for( int i = 0; i < 3; i++ )
+	{
+		if( g_tabIcons[i].tex != 0 )
+			glDeleteTextures( 1, &g_tabIcons[i].tex );
+		g_tabIcons[i].tex = 0;
+	}
+}
+
+/* ---------------------------------------------------------------------------
+ * Строка вкладок: иконка (+ надпись, если всем трём хватает ширины).
+ * Кастомные кнопки в стиле темы (стандартный TabBar imgui синий и сюда не
+ * вписывается), скругление только сверху. Сама строка фиксирована —
+ * прокручивается только контент под ней.
  * ------------------------------------------------------------------------- */
 int g_active_tab = 0;
 
@@ -649,14 +732,47 @@ void DrawTabsRow()
 	const float tab_h    = fs * 2.6f * kTabScale;
 	const float gap      = fs * 0.4f;
 	const float avail    = ImGui::GetContentRegionAvail().x;
-	const float tab_w    = ( avail - gap * 2.f ) / 3.f;
 	const float rounding = fs * 0.8f;
 
+	/* Иконка — квадрат ~1.5 шрифта; внутренние отступы вкладки. */
+	const float icon_sz   = fs * 1.5f;
+	const float inner_pad = fs * 0.8f;
+	const float icon_gap  = fs * 0.4f; /* между иконкой и надписью */
+
+	/* Адаптив: либо «иконка+надпись» на ВСЕХ вкладках, либо иконки без
+	   надписей на всех. Ширины содержимого считаем каждый кадр (дёшево,
+	   корректно при повороте/ресайзе). */
+	float content_w[3], text_w[3];
+	float total = gap * 2.f;
+	for( int i = 0; i < 3; i++ )
+	{
+		text_w[i]     = ImGui::CalcTextSize( names[i] ).x;
+		const bool icon = g_tabIcons[i].tex != 0;
+		content_w[i]  = inner_pad * 2.f
+			+ ( icon ? icon_sz + icon_gap + text_w[i] : text_w[i] );
+		total += content_w[i];
+	}
+	const bool labels = total <= avail;
+	if( !labels )
+	{
+		total = gap * 2.f;
+		for( int i = 0; i < 3; i++ )
+		{
+			const bool icon = g_tabIcons[i].tex != 0;
+			content_w[i] = inner_pad * 2.f
+				+ ( icon ? icon_sz : text_w[i] );
+			total += content_w[i];
+		}
+	}
+
 	/* Цвета — из активной темы: активная вкладка акцентная, остальные —
-	   как неактивные фреймы. */
+	   как неактивные фреймы. Тинт иконок — цвет текста темы (иконки
+	   отбелены при загрузке). */
 	const ImVec4 accent  = ImGui::GetStyleColorVec4( ImGuiCol_SliderGrab );
 	const ImVec4 normal  = ImGui::GetStyleColorVec4( ImGuiCol_FrameBg );
 	const ImVec4 hovered = ImGui::GetStyleColorVec4( ImGuiCol_FrameBgHovered );
+	const ImU32  text_col = ImGui::GetColorU32( ImGuiCol_Text );
+	const float  line_h   = ImGui::GetTextLineHeight();
 
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	for( int i = 0; i < 3; i++ )
@@ -664,6 +780,7 @@ void DrawTabsRow()
 		if( i > 0 )
 			ImGui::SameLine( 0.f, gap );
 
+		const float tab_w = content_w[i];
 		ImGui::PushID( i );
 		ImGui::InvisibleButton( "##tab", ImVec2( tab_w, tab_h ));
 		const bool sel = ( g_active_tab == i );
@@ -676,10 +793,27 @@ void DrawTabsRow()
 		dl->AddRectFilled( rmin, rmax, ImGui::GetColorU32( col ),
 			rounding, ImDrawFlags_RoundCornersTop );
 
-		const ImVec2 ts = ImGui::CalcTextSize( names[i] );
-		dl->AddText( ImVec2( rmin.x + ( tab_w - ts.x ) * 0.5f,
-				rmin.y + ( tab_h - ts.y ) * 0.5f ),
-			ImGui::GetColorU32( ImGuiCol_Text ), names[i] );
+		const bool icon = g_tabIcons[i].tex != 0;
+		if( icon )
+		{
+			const float body_w = labels ? icon_sz + icon_gap + text_w[i] : icon_sz;
+			const float ix = rmin.x + ( tab_w - body_w ) * 0.5f;
+			const float iy = rmin.y + ( tab_h - icon_sz ) * 0.5f;
+			dl->AddImage( (ImTextureID)(intptr_t)g_tabIcons[i].tex,
+				ImVec2( ix, iy ), ImVec2( ix + icon_sz, iy + icon_sz ),
+				ImVec2( 0, 0 ), ImVec2( 1, 1 ), text_col );
+			if( labels )
+				dl->AddText( ImVec2( ix + icon_sz + icon_gap,
+						rmin.y + ( tab_h - line_h ) * 0.5f ),
+					text_col, names[i] );
+		}
+		else
+		{
+			/* Fallback: иконки нет — вкладка как раньше, одним текстом. */
+			dl->AddText( ImVec2( rmin.x + ( tab_w - text_w[i] ) * 0.5f,
+					rmin.y + ( tab_h - line_h ) * 0.5f ),
+				text_col, names[i] );
+		}
 		ImGui::PopID();
 	}
 }
@@ -931,6 +1065,9 @@ extern "C" int Launcher_Run( void )
 	ImGui_ImplSDL2_InitForOpenGL( window, nullptr );
 	ImGui_ImplOpenGL3_Init();
 
+	/* Иконки вкладок — GL-контекст уже жив (eglwInitialize выше). */
+	LoadTabIcons();
+
 	/* Конфиг + предвыбор ресурсов: сохранённый путь, иначе стандартный
 	   ~/Downloads/Games/Quake2 — если валиден, пользователю достаточно
 	   нажать «Начать игру». */
@@ -1023,7 +1160,9 @@ extern "C" int Launcher_Run( void )
 
 	/* Выгружаем только imgui (освобождает свои VAO/VBO/программу/текстуру
 	   шрифта). Окно и EGL НЕ трогаем — их подхватывает движок. SDL_Quit
-	   не вызываем. */
+	   не вызываем. Текстуры иконок вкладок удаляем первыми — пока контекст
+	   жив, и чтобы не оставлять занятых id движку. */
+	FreeTabIcons();
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplSDL2_Shutdown();
 	ImGui::DestroyContext();
