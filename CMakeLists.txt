@@ -93,6 +93,18 @@ pkg_check_modules(GLESV2 glesv2 REQUIRED)
 pkg_check_modules(EGL egl REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT wayland-client REQUIRED)
 
+# Системная экранная клавиатура Maliit (OSK ОС Аврора) для лаунчера:
+# maliit_client.c (glob src/quake2/client/*.c) собирается в no-op стабы без
+# AURORA_MALIIT — host-сборка без glib не ломается (по образцу aurora_keepalive.c
+# / dbus-1 ниже). На устройстве glib/gio системные (ими пользуется Maliit) —
+# в бандл класть не нужно, в spec'и — только BuildRequires.
+pkg_check_modules(MALIIT_DEPS glib-2.0 gio-2.0 gio-unix-2.0 IMPORTED_TARGET)
+if(MALIIT_DEPS_FOUND)
+    add_compile_definitions(AURORA_MALIIT)
+else()
+    message(WARNING "glib-2.0/gio-2.0 не найдены: экранная клавиатура Maliit в лаунчере отключена")
+endif()
+
 # Собираем zlib статикой из исходников (оригинальный CMakeLists zlib
 # в upstream-репозитории lp-public неполный, поэтому делаем минимальный target).
 add_library(zlib_quake2 STATIC
@@ -210,6 +222,7 @@ target_link_libraries(quake2
     ${EGL_LIBRARIES}
     ${WAYLAND_CLIENT_LIBRARIES}
     $<$<TARGET_EXISTS:PkgConfig::DBUS>:PkgConfig::DBUS>
+    $<$<TARGET_EXISTS:PkgConfig::MALIIT_DEPS>:PkgConfig::MALIIT_DEPS>
     zlib_quake2
     imgui
     m

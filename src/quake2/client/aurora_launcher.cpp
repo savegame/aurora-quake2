@@ -25,6 +25,15 @@ extern "C" {
 }
 #include "aurora_imgui.h"
 
+#if defined(AURORA_MALIIT)
+/* Системная экранная клавиатура Maliit (OSK ОС Аврора) для полей ввода
+   лаунчера. Мост превращает commit_string/keyEvent сервера в SDL_TEXTINPUT/
+   SDL_KEYDOWN (SDL_PushEvent) — imgui-бэкенд сам подкладывает текст активному
+   InputText, поля ничего не знают про Maliit. */
+#include "maliit_bridge.h"
+#include "maliit_client.h"
+#endif
+
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
@@ -283,6 +292,64 @@ std::string SanitizeMapName( const std::string &s )
 	}
 	return r;
 }
+
+/* Cvar_InfoValidate (common/cvar.c) для SERVERINFO-cvar'ов отклоняет значения
+   с ", ; и \ — hostname с такими символами молча не применился бы движком.
+   Вырезаем их ещё на вводе (актуально и для OSK — она free text). */
+void StripInfoInvalidChars( char *s )
+{
+	char *w = s;
+	for( const char *r = s; *r != '\0'; r++ )
+		if( *r != '"' && *r != ';' && *r != '\\' )
+			*w++ = *r;
+	*w = '\0';
+}
+
+#if defined(AURORA_MALIIT)
+/* Маппинг ориентации дисплея в градусы для maliit-сервера
+   (docs/maliit_keyboard.md; как в платформенной SDL2 ОС Аврора). */
+int MaliitOrientationDegrees( SDL_Window *window )
+{
+	int displayIndex = SDL_GetWindowDisplayIndex( window );
+	if( displayIndex < 0 )
+		displayIndex = 0;
+	switch( SDL_GetDisplayOrientation( displayIndex ))
+	{
+	case SDL_ORIENTATION_PORTRAIT:          return 0;
+	case SDL_ORIENTATION_PORTRAIT_FLIPPED:  return 180;
+	case SDL_ORIENTATION_LANDSCAPE:         return 270;
+	case SDL_ORIENTATION_LANDSCAPE_FLIPPED: return 90;
+	}
+	return 0;
+}
+
+/* Вызывается каждый кадр после ImGui::NewFrame() (там io.WantTextInput
+   актуален). Показ/скрытие OSK — строго по переходам WantTextInput: тап в
+   InputText → true, Enter/потеря фокуса → false. Соединение с сервером при
+   этом живёт всё время работы лаунчера (переподключения заставляют OSK
+   моргать). */
+void UpdateMaliitKeyboard( SDL_Window *window, bool *prev_want )
+{
+	const bool want = ImGui::GetIO().WantTextInput;
+	if( want == *prev_want )
+		return;
+	*prev_want = want;
+	if( want )
+	{
+		/* Настройки поля применяются на следующий focus_in/show —
+		   выставляем ДО включения ввода. Парольных полей в лаунчере
+		   нет: free text, prediction/correction/autocaps выключены. */
+		maliit_client_set_content_type( MALIIT_CONTENT_FREE_TEXT );
+		maliit_client_set_prediction( false );
+		maliit_client_set_correction( false );
+		maliit_client_set_autocaps( false );
+		maliit_client_set_orientation( MaliitOrientationDegrees( window ));
+		maliit_bridge_enable_text_input( true );
+	}
+	else
+		maliit_bridge_enable_text_input( false );
+}
+#endif /* AURORA_MALIIT */
 
 /* ---------------------------------------------------------------------------
  * Конфиг лаунчера: ~/.config/<org>/<app>/launcher.conf, key=value.
@@ -744,22 +811,30 @@ void DrawTab_Network()
 	}
 	else
 	{
-		/* Fallback: карт не нашлось — ввод имени вручную.
-		   TODO(сетевая-вкладка): на устройстве нет экранной клавиатуры
-		   в лаунчере — ввод доступен только с физической клавиатуры. */
+		/* Fallback: карт не нашлось — ввод имени вручную (на устройстве —
+		   через системную OSK Maliit, как у hostname ниже). */
 		char buf[64];
 		snprintf( buf, sizeof( buf ), "%s", g_settings.sv_map.c_str());
 		if( ImGui::InputText( "Карта (имя без .bsp)", buf, sizeof( buf )))
 			g_settings.sv_map = buf;
 	}
 
-	/* Имя сервера. TODO(сетевая-вкладка): то же про экранную клавиатуру —
-	   дефолт задан, поле в основном для хоста/физической клавиатуры. */
+	/* Имя сервера. На устройстве тап по полю поднимает системную OSK
+	   Maliit (переход io.WantTextInput, см. UpdateMaliitKeyboard); текст
+	   приходит SDL_TEXTINPUT и imgui подкладывает его этому InputText.
+	   Физическая клавиатура работает штатно. */
 	{
 		char buf[64];
 		snprintf( buf, sizeof( buf ), "%s", g_settings.sv_hostname.c_str());
 		if( ImGui::InputText( "Имя сервера", buf, sizeof( buf )))
+		{
+			StripInfoInvalidChars( buf );
 			g_settings.sv_hostname = buf;
+		}
+		/* Поле — в прокручиваемой области контента; при фокусе поднимаем
+		   его ближе к верху, чтобы OSK (низ экрана) его не перекрыла. */
+		if( ImGui::IsItemActivated())
+			ImGui::SetScrollHereY( 0.3f );
 	}
 
 	ImGui::PushItemWidth( -fs * 6.f );
@@ -1320,6 +1395,14 @@ extern "C" int Launcher_Run( void )
 	/* Иконки вкладок — GL-контекст уже жив (eglwInitialize выше). */
 	LoadTabIcons();
 
+#if defined(AURORA_MALIIT)
+	/* Системная OSK (Maliit): соединение с сервером держим живым всё время
+	   работы лаунчера; show/hide — по переходам io.WantTextInput в цикле
+	   (UpdateMaliitKeyboard). На хосте без maliit-server клиент остаётся
+	   в inert-состоянии — ничего не моргает и не мешает. */
+	maliit_bridge_init();
+#endif
+
 	/* Конфиг + предвыбор ресурсов: сохранённый путь, иначе стандартный
 	   ~/Downloads/Games/Quake2 — если валиден, пользователю достаточно
 	   нажать «Начать игру». */
@@ -1348,6 +1431,11 @@ extern "C" int Launcher_Run( void )
 	const Uint32 loop_start = SDL_GetTicks();
 	bool auto_fired = false;
 
+#if defined(AURORA_MALIIT)
+	/* Отслеживание переходов io.WantTextInput для показа/скрытия OSK. */
+	bool maliit_want_prev = false;
+#endif
+
 	while( !g_launch && !user_quit )
 	{
 		SDL_GetWindowSize( window, &win_w, &win_h );
@@ -1362,6 +1450,13 @@ extern "C" int Launcher_Run( void )
 			else if( ev.type == SDL_FINGERDOWN || ev.type == SDL_FINGERUP || ev.type == SDL_FINGERMOTION )
 				ProcessTouchEvent( ev, win_w, win_h );
 		}
+
+#if defined(AURORA_MALIIT)
+		/* Доставка входящих DBus-вызовов maliit (commit_string и пр. мост
+		   превращает в SDL-события — они уйдут в imgui на следующей
+	   итерации SDL_PollEvent). */
+		maliit_bridge_pump();
+#endif
 
 		if( auto_start && !auto_fired && SDL_GetTicks() - loop_start >= 2500 )
 		{
@@ -1379,6 +1474,11 @@ extern "C" int Launcher_Run( void )
 		ImGui_ImplSDL2_NewFrame();
 		ApplyPendingScroll();
 		ImGui::NewFrame();
+
+#if defined(AURORA_MALIIT)
+		/* Показ/скрытие системной OSK по фокусу текстовых полей. */
+		UpdateMaliitKeyboard( window, &maliit_want_prev );
+#endif
 
 		DrawLauncherUI( user_quit, win_w, win_h );
 
@@ -1435,6 +1535,9 @@ extern "C" int Launcher_Run( void )
 	   не вызываем. Текстуры иконок вкладок удаляем первыми — пока контекст
 	   жив, и чтобы не оставлять занятых id движку. */
 	FreeTabIcons();
+#if defined(AURORA_MALIIT)
+	maliit_bridge_shutdown();
+#endif
 	ImGui_ImplOpenGL3_Shutdown();
 	ImGui_ImplSDL2_Shutdown();
 	ImGui::DestroyContext();
