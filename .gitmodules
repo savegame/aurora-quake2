@@ -3,5 +3,5 @@
 	url = https://github.com/savegame/SDL
 [submodule "openffa"]
 	path = openffa
-	url = https://github.com/Niehztog/openffa-xatrix.git
-	branch = master
+	url = https://github.com/savegame/openffa-xatrix.git
+	branch = aurora-port
