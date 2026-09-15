@@ -1343,8 +1343,10 @@ extern "C" int Launcher_Run( void )
 		}
 	}
 	/* GL-контекст создан через SDL (eglwInitialize под AURORA_OS) —
-	   vsync через SDL API. */
-	SDL_GL_SetSwapInterval( 1 );
+	   vsync через SDL API. На Hybris-устройствах interval=1 залипает на
+	   half-rate (жёсткие 30 FPS) — держим лаунчер согласованным с дефолтом
+	   движка (gl_swapinterval "0" под AURORA_OS, см. r_main.c). */
+	SDL_GL_SetSwapInterval( 0 );
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();

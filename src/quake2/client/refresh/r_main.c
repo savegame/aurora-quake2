@@ -4373,7 +4373,15 @@ static void R_Register()
     #endif
 	gl_ztrick = Cvar_Get("gl_ztrick", "0", CVAR_ARCHIVE);
 	gl_zfix = Cvar_Get("gl_zfix", "0", 0);
+#if defined(AURORA_OS)
+	/* На Hybris-устройствах SDL_GL_SetSwapInterval(1) залипает на half-rate
+	   (жёсткие 30 FPS вместо 60) — драйвер hwcomposer трактует интервал
+	   иначе, чем DRM/Mesa. Дефолт для Авроры — vsync выключен; переключатель
+	   доступен в меню Graphics для тех, у кого vsync работает нормально. */
+	gl_swapinterval = Cvar_Get("gl_swapinterval", "0", CVAR_ARCHIVE);
+#else
 	gl_swapinterval = Cvar_Get("gl_swapinterval", "1", CVAR_ARCHIVE);
+#endif
 
 	gl_speeds = Cvar_Get("gl_speeds", "0", 0);
 	r_norefresh = Cvar_Get("r_norefresh", "0", 0);
