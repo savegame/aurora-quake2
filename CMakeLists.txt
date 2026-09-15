@@ -8,6 +8,7 @@ cmake_minimum_required(VERSION 3.16)
 project(Quake2Aurora C CXX)
 
 option(AURORA_FBO "Включить FBO-модуль для поворота/ресайза (этап 2)" OFF)
+option(AURORA_VR "Картонный VR: ориентация головы по сенсорам sensorfwd" OFF)
 option(BUNDLE_SDL2 "Собирать встроенный SDL2 из libsdl (Aurora-фикс)" OFF)
 
 set(CMAKE_C_STANDARD 99)
@@ -105,6 +106,28 @@ else()
     message(WARNING "glib-2.0/gio-2.0 не найдены: экранная клавиатура Maliit в лаунчере отключена")
 endif()
 
+# D-Bus нужен двум потребителям: запрету гашения экрана через MCE
+# (устройственная сборка, ниже) и клиенту sensorfwd для картонного VR.
+# Ищем один раз здесь; в host-сборке без VR и без бандла SDL поиск не
+# выполняется вовсе — зависимости движка не меняются.
+if(BUNDLE_SDL2 OR AURORA_VR)
+    pkg_check_modules(DBUS dbus-1 IMPORTED_TARGET)
+endif()
+
+# Картонный VR (сенсоры sensorfwd: акселерометр + гироскоп).
+# vr_head.c / sensorfw_async.c попадают в glob src/quake2/client/*.c и без
+# дефайна собираются в no-op стабы, так что host-сборка не зависит от
+# D-Bus (по образцу aurora_keepalive.c / maliit_client.c).
+set(AURORA_VR_ENABLED OFF)
+if(AURORA_VR)
+    if(DBUS_FOUND)
+        add_compile_definitions(AURORA_VR)
+        set(AURORA_VR_ENABLED ON)
+    else()
+        message(WARNING "dbus-1 не найден: картонный VR (сенсоры) отключён")
+    endif()
+endif()
+
 # Собираем zlib статикой из исходников (оригинальный CMakeLists zlib
 # в upstream-репозитории lp-public неполный, поэтому делаем минимальный target).
 add_library(zlib_quake2 STATIC
@@ -190,7 +213,7 @@ list(APPEND QUAKE2_SOURCES src/quake2/client/aurora_launcher.cpp)
 # (BUNDLE_SDL2=ON). aurora_keepalive.c попадает в glob выше и без dbus-1
 # собирается в заглушки, так что host-сборка не зависит от D-Bus/MCE.
 if(BUNDLE_SDL2)
-    pkg_check_modules(DBUS dbus-1 IMPORTED_TARGET)
+    # dbus-1 уже найден выше (общий поиск для MCE и VR).
     if(DBUS_FOUND)
         add_compile_definitions(AURORA_MCE_KEEPALIVE)
     else()
@@ -228,6 +251,18 @@ target_link_libraries(quake2
     m
     dl
 )
+
+# --- Синтетический тест фильтра ориентации (host-only) ---------------------
+# Гоняет vr_math.h на сгенерированной траектории головы: маппинг осей,
+# извлечение углов, сходимость Махони при заданном bias, поведение гейта
+# акселерометра. Математику VR иначе не проверить — для этого нужен шлем,
+# а ошибки в знаках осей ловятся именно здесь. В основной бинарь не входит
+# и при кросс-сборке не собирается (запускать его негде).
+if(AURORA_VR_ENABLED AND NOT CMAKE_CROSSCOMPILING)
+    add_executable(vr_filter_test tests/vr_filter_test.c)
+    target_include_directories(vr_filter_test PRIVATE src/quake2/client)
+    target_link_libraries(vr_filter_test m)
+endif()
 
 # --- Миссион-пакеты (game.so) ----------------------------------------------
 

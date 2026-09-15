@@ -8,7 +8,7 @@ Icon=__ORGNAME__.__APPNAME__
 Exec=__ORGNAME__.__APPNAME__
 
 [X-Application]
-Permissions=Internet;Audio;UserDirs
+Permissions=Internet;Audio;UserDirs;Sensors
 OrganizationName=__ORGNAME__
 ApplicationName=__APPNAME__
 

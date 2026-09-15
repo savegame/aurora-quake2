@@ -51,6 +51,7 @@ cmake \
     -DAURORA_ORG=%{_app_orgname} \
     -DAURORA_APP=%{_app_appname} \
     -DAURORA_FBO=ON \
+    -DAURORA_VR=ON \
     -DBUNDLE_SDL2=ON \
     -S . \
     -B build/%{_arch}/rpm

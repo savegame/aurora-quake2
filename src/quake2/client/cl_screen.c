@@ -26,6 +26,7 @@
  */
 
 #include "client/client.h"
+#include "client/vr_head.h"
 
 #if defined(AURORA_OS)
 #include "client/cl_touch.h"
@@ -1373,6 +1374,10 @@ void SCR_UpdateScreen()
 			if (i == numframes - 1)
 				Touch_DrawOverlay();
 #endif
+
+			/* Отладка VR (vr_debug): рисуется в обоих глазах — в шлеме
+			   иначе цифры видит только один глаз. Без AURORA_VR — no-op. */
+			VR_DrawDebug();
 
 			SCR_DrawLoading();
 		}

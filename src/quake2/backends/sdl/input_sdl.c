@@ -5,6 +5,7 @@
 #if defined(AURORA_FBO)
 #include "client/refresh/r_fbo.h"
 #endif
+#include "client/vr_head.h"
 
 #if defined(AURORA_OS)
 #include "client/cl_touch.h"
@@ -806,6 +807,12 @@ static float ComputeStickValue(float stickValue)
  */
 void IN_Move(usercmd_t *cmd)
 {
+	/* Сенсоры головы: автоматы sensorfwd + разбор всех накопившихся
+	   семплов. Здесь, а не в главном цикле, потому что это уже точка
+	   сбора ввода и вызывается она ровно раз за кадр (CL_CreateCmd).
+	   На cl.viewangles модуль пока не влияет — это этап 3 плана. */
+	VR_Frame();
+
     int mouseX = l_mouseX, mouseY = l_mouseY;
 	l_mouseX = l_mouseY = 0;
 

@@ -27,6 +27,7 @@
 
 #include "client/client.h"
 #include "backends/input.h"
+#include "client/vr_head.h"
 
 void CL_ForwardToServer_f();
 void CL_Changing_f();
@@ -832,6 +833,10 @@ void CL_Init()
 	IN_Init();
 	V_Init();
 
+	/* Ориентация головы по сенсорам (картонный VR). Без AURORA_VR —
+	   заглушка; сессии sensorfwd открываются только при vr_enabled 1. */
+	VR_Init();
+
 	net_message.data = net_message_buffer;
 	net_message.maxsize = sizeof(net_message_buffer);
 
@@ -866,6 +871,7 @@ void CL_Shutdown()
 	OGG_Stop();
 	#endif
 	S_Shutdown();
+	VR_Shutdown();
 	IN_Shutdown();
 	R_finalize();
 }
