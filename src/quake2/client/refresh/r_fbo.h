@@ -47,4 +47,19 @@ int RFBO_GetRotation(void);
    в координаты контента (пиксели FBO) с учётом поворота квада (этап 4). */
 void RFBO_TransformTouch(float fx, float fy, int *x, int *y);
 
+/* Картонный VR (AURORA_VR): раскладка изображений глаз под линзы.
+   split = false — вывод обычным полноэкранным квадом, как без VR.
+   split = true — левая и правая половины текстуры рисуются двумя квадами
+   с центрами на заданном расстоянии (мм экрана), см. client/vr_lens.h.
+   Вершины пересчитываются здесь и при смене поворота/размера/дисплея —
+   не в кадре. Вызывать только при изменении параметров. */
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm);
+
+/* Окно переехало на другой дисплей: перечитать DPI и пересчитать раскладку. */
+void RFBO_RefreshDisplayMetrics(void);
+
+/* Физический размер контента, по которому посчитана раскладка (мм).
+   Возвращает false, если DPI не получен и взят фолбэк. */
+bool RFBO_GetLensScreenMm(float *widthMm, float *heightMm);
+
 #endif

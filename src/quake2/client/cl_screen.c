@@ -1228,6 +1228,20 @@ void SCR_DrawLayout()
  * This is called every frame, and can also be called
  * explicitly to flush text to the screen.
  */
+#if defined(AURORA_OS)
+/* Тач-оверлей. В VR-режиме не рисуется: он попал бы только в один глаз
+   (рисуется на последнем проходе цикла глаз), а телефон в держателе
+   пальцем всё равно не достать. Геймпад работает без оверлея. */
+static void SCR_DrawTouchOverlay(void)
+{
+#if defined(AURORA_VR)
+	if (VR_ModeEnabled())
+		return;
+#endif
+	Touch_DrawOverlay();
+}
+#endif
+
 void SCR_UpdateScreen()
 {
 	int numframes;
@@ -1296,7 +1310,7 @@ void SCR_UpdateScreen()
 				M_Draw();
 #if defined(AURORA_OS)
 				if (i == numframes - 1)
-					Touch_DrawOverlay();
+					SCR_DrawTouchOverlay();
 #endif
 			}
 			else
@@ -1311,7 +1325,7 @@ void SCR_UpdateScreen()
 				SCR_DrawConsole();
 #if defined(AURORA_OS)
 				if (i == numframes - 1)
-					Touch_DrawOverlay();
+					SCR_DrawTouchOverlay();
 #endif
 			}
 			else
@@ -1319,7 +1333,7 @@ void SCR_UpdateScreen()
 				SCR_DrawCinematic();
 #if defined(AURORA_OS)
 				if (i == numframes - 1)
-					Touch_DrawOverlay();
+					SCR_DrawTouchOverlay();
 #endif
 			}
 		}
@@ -1372,7 +1386,7 @@ void SCR_UpdateScreen()
 
 #if defined(AURORA_OS)
 			if (i == numframes - 1)
-				Touch_DrawOverlay();
+				SCR_DrawTouchOverlay();
 #endif
 
 			/* Отладка VR (vr_debug): рисуется в обоих глазах — в шлеме
@@ -1381,6 +1395,12 @@ void SCR_UpdateScreen()
 
 			SCR_DrawLoading();
 		}
+
+#if defined(AURORA_VR)
+		/* Мишень калибровки линз — в каждом глазу и в любом состоянии
+		   (игра, меню, консоль, заставка): войти можно и командой. */
+		VR_LensDraw();
+#endif
 	}
 
 	R_Frame_end();

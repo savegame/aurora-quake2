@@ -23,6 +23,10 @@
 
 #if defined(AURORA_FBO)
 
+#if defined(AURORA_VR)
+#include "client/vr_lens.h"
+#endif
+
 
 /* Attribute locations, гарантированно не пересекающиеся с wrapper'ом
    (a_position/a_color/a_texcoord0/a_texcoord1 — низкие индексы). */
@@ -43,6 +47,18 @@ static struct
 	float scale;
 	int rotation;         /* enum wl_output_transform */
 	bool ready;
+#if defined(AURORA_VR)
+	/* Раскладка глаз под линзы. Параметры задаёт клиент (vr_lens.c),
+	   вершины готовятся в RFBO_UpdateLensLayout по событиям; кадр берёт
+	   готовые drawVerts/drawCount. */
+	bool lensSplit;
+	float lensSepMm, lensVofsMm, lensTiltMm;
+	float lensWidthMm, lensHeightMm;
+	bool lensFromDpi;
+	float lensVerts[48];
+	const float *drawVerts;
+	int drawCount;
+#endif
 } l_fbo;
 
 /* Полноэкранный квад в NDC: (-1,-1)..(1,1), pos2 + uv2.
@@ -213,12 +229,82 @@ static void RFBO_ComputeSize(int windowWidth, int windowHeight, int *fboW, int *
 	}
 }
 
+#if defined(AURORA_VR)
+/*
+ * Пересчёт вершин двух квадов глаз. Только по событиям: смена параметров
+ * калибровки, поворота, размера окна, дисплея. В RFBO_DrawToScreen — лишь
+ * готовый массив.
+ *
+ * Ширина контента в пикселях экрана зависит от поворота (контент
+ * ландшафтный, панель любая — см. RFBO_ComputeSize), поэтому берётся по
+ * чётности rotation, а не по допущению «панель портретная».
+ */
+static void RFBO_UpdateLensLayout(void)
+{
+	l_fbo.drawVerts = l_quadVerts;
+	l_fbo.drawCount = 6;
+	if (!l_fbo.lensSplit || l_fbo.screenW <= 0 || l_fbo.screenH <= 0)
+		return;
+
+	bool swapped = (l_fbo.rotation & 1) != 0;
+	int contentW = swapped ? l_fbo.screenH : l_fbo.screenW;
+	int contentH = swapped ? l_fbo.screenW : l_fbo.screenH;
+
+	/* Дисплей — по окну, как в Touch_RefreshDpi. ddpi, а не hdpi/vdpi:
+	   в Wayland-бэкенде SDL только диагональ не зависит от transform. */
+	int displayIndex = 0;
+	if (sdlwContext != NULL && sdlwContext->window != NULL)
+	{
+		displayIndex = SDL_GetWindowDisplayIndex(sdlwContext->window);
+		if (displayIndex < 0)
+			displayIndex = 0;
+	}
+	float ddpi = 0.0f;
+	if (SDL_GetDisplayDPI(displayIndex, &ddpi, NULL, NULL) != 0)
+		ddpi = 0.0f;
+
+	bool fromDpi = VRL_ContentSizeMm(ddpi, contentW, contentH, &l_fbo.lensWidthMm, &l_fbo.lensHeightMm) != 0;
+	if (fromDpi != l_fbo.lensFromDpi || !fromDpi)
+	{
+		/* Лог только при смене источника (или всегда при фолбэке — это
+		   редкое событие и важная диагностика «почему 63 мм не 63 мм»),
+		   а не на каждый шаг калибровки. */
+		static bool l_loggedFallback = false;
+		if (fromDpi || !l_loggedFallback)
+			R_printf(PRINT_ALL, "RFBO: lens layout, screen %.0fx%.0f mm (%s, ddpi %.0f)\n",
+				l_fbo.lensWidthMm, l_fbo.lensHeightMm, fromDpi ? "dpi" : "fallback", ddpi);
+		l_loggedFallback = !fromDpi;
+	}
+	l_fbo.lensFromDpi = fromDpi;
+
+	float c[4];
+	VRL_EyeCenters(l_fbo.lensWidthMm, l_fbo.lensHeightMm,
+		l_fbo.lensSepMm, l_fbo.lensVofsMm, l_fbo.lensTiltMm, c);
+	l_fbo.drawCount = VRL_BuildEyeQuads(c, l_fbo.lensVerts);
+	l_fbo.drawVerts = l_fbo.lensVerts;
+}
+#endif
+
 bool RFBO_Init(int windowWidth, int windowHeight)
 {
 	/* rotation выставляется вызывающим кодом ДО Init (от него зависят
 	   размеры FBO) — сохраняем его. */
 	int rotation = l_fbo.rotation;
+#if defined(AURORA_VR)
+	/* Параметры линз задаёт клиент один раз при изменении; пересоздание
+	   рендера (vid_restart) не должно их терять. */
+	bool lensSplit = l_fbo.lensSplit;
+	float lensSep = l_fbo.lensSepMm, lensVofs = l_fbo.lensVofsMm, lensTilt = l_fbo.lensTiltMm;
+#endif
 	memset(&l_fbo, 0, sizeof(l_fbo));
+#if defined(AURORA_VR)
+	l_fbo.lensSplit = lensSplit;
+	l_fbo.lensSepMm = lensSep;
+	l_fbo.lensVofsMm = lensVofs;
+	l_fbo.lensTiltMm = lensTilt;
+	l_fbo.drawVerts = l_quadVerts;
+	l_fbo.drawCount = 6;
+#endif
 	l_fbo.scale = 1.0f;
 #if defined(AURORA_OS)
 	/* Множитель разрешения рендера из лаунчера (env AURORA_R_3D_SCALE),
@@ -261,6 +347,9 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 	viddef.height = l_fbo.fboH;
 
 	l_fbo.ready = true;
+#if defined(AURORA_VR)
+	RFBO_UpdateLensLayout();
+#endif
 	R_printf(PRINT_ALL, "RFBO: %ix%i -> screen %ix%i\n", l_fbo.fboW, l_fbo.fboH, l_fbo.screenW, l_fbo.screenH);
 	/* Временная диагностика: что SDL сообщает о дисплее на старте рендера.
 	   Дисплей — по окну (перенос на внешний экран), не захардкоженный 0. */
@@ -319,6 +408,9 @@ void RFBO_Resize(int windowWidth, int windowHeight)
 
 	viddef.width = l_fbo.fboW;
 	viddef.height = l_fbo.fboH;
+#if defined(AURORA_VR)
+	RFBO_UpdateLensLayout();
+#endif
 	/* Редкое событие (реальный ресайз/перенос на другой дисплей) — можно в лог. */
 	R_printf(PRINT_ALL, "RFBO: resize %ix%i -> screen %ix%i rotation %i\n",
 		l_fbo.fboW, l_fbo.fboH, l_fbo.screenW, l_fbo.screenH, l_fbo.rotation);
@@ -350,6 +442,17 @@ void RFBO_DrawToScreen(void)
 	   после блита возвращаем всё в состояние кэша wrapper'а). */
 	glDisable(GL_BLEND);
 	glDisable(GL_DEPTH_TEST);
+#if defined(AURORA_VR)
+	/* Квады глаз покрывают экран не целиком (сдвиг под линзы) — остальное
+	   должно быть чёрным, а не прошлым кадром. Флаг готов заранее
+	   (RFBO_UpdateLensLayout); цвет очистки движок выставляет сам перед
+	   каждой своей очисткой (R_Frame_clear), кэша у wrapper'а для него нет. */
+	if (l_fbo.drawVerts != l_quadVerts)
+	{
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+	}
+#endif
 
 	glUseProgram(l_fbo.program);
 	glUniformMatrix2fv(l_fbo.uRot, 1, GL_FALSE, l_rotMatrices[l_fbo.rotation & 3]);
@@ -364,9 +467,17 @@ void RFBO_DrawToScreen(void)
 
 	glEnableVertexAttribArray(RFBO_ATTR_POS);
 	glEnableVertexAttribArray(RFBO_ATTR_UV);
+#if defined(AURORA_VR)
+	/* Позиции квадов глаз — в осях контента, до u_rot: поворот экрана
+	   калибровку не ломает. Дисторсия (этап 5) ляжет в UV этих же квадов. */
+	glVertexAttribPointer(RFBO_ATTR_POS, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_fbo.drawVerts);
+	glVertexAttribPointer(RFBO_ATTR_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_fbo.drawVerts + 2);
+	glDrawArrays(GL_TRIANGLES, 0, l_fbo.drawCount);
+#else
 	glVertexAttribPointer(RFBO_ATTR_POS, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_quadVerts);
 	glVertexAttribPointer(RFBO_ATTR_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_quadVerts + 2);
 	glDrawArrays(GL_TRIANGLES, 0, 6);
+#endif
 	glDisableVertexAttribArray(RFBO_ATTR_POS);
 	glDisableVertexAttribArray(RFBO_ATTR_UV);
 
@@ -419,8 +530,21 @@ void RFBO_SetRotation(int wlOutputTransform)
 	{
 		l_fbo.rotation = newRotation;
 		RFBO_Resize(l_fbo.screenW, l_fbo.screenH);
+#if defined(AURORA_VR)
+		/* Resize мог выйти рано (размер FBO совпал) — ширина контента на
+		   экране всё равно сменила ось. */
+		RFBO_UpdateLensLayout();
+#endif
 		return;
 	}
+#if defined(AURORA_VR)
+	if (l_fbo.rotation != newRotation)
+	{
+		l_fbo.rotation = newRotation;
+		RFBO_UpdateLensLayout();
+		return;
+	}
+#endif
 	l_fbo.rotation = newRotation;
 }
 
@@ -449,6 +573,29 @@ void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
 	*y = (int)((1.0f - cy) * 0.5f * l_fbo.fboH);
 }
 
+#if defined(AURORA_VR)
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm)
+{
+	l_fbo.lensSplit = split;
+	l_fbo.lensSepMm = sepMm;
+	l_fbo.lensVofsMm = vofsMm;
+	l_fbo.lensTiltMm = tiltMm;
+	RFBO_UpdateLensLayout();
+}
+
+void RFBO_RefreshDisplayMetrics(void)
+{
+	RFBO_UpdateLensLayout();
+}
+
+bool RFBO_GetLensScreenMm(float *widthMm, float *heightMm)
+{
+	*widthMm = l_fbo.lensWidthMm;
+	*heightMm = l_fbo.lensHeightMm;
+	return l_fbo.lensFromDpi;
+}
+#endif
+
 #else /* !AURORA_FBO — заглушки, сборка без дефайна = движок как раньше. */
 
 bool RFBO_Init(int windowWidth, int windowHeight) { (void)windowWidth; (void)windowHeight; return false; }
@@ -466,4 +613,19 @@ void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
 	(void)fx; (void)fy; (void)x; (void)y;
 }
 
+#endif
+
+#if !(defined(AURORA_FBO) && defined(AURORA_VR))
+/* Без FBO или без VR раскладки глаз нет: вывод (если он есть) — один квад. */
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm)
+{
+	(void)split; (void)sepMm; (void)vofsMm; (void)tiltMm;
+}
+void RFBO_RefreshDisplayMetrics(void) {}
+bool RFBO_GetLensScreenMm(float *widthMm, float *heightMm)
+{
+	*widthMm = 0.0f;
+	*heightMm = 0.0f;
+	return false;
+}
 #endif

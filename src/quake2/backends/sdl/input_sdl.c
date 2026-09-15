@@ -765,6 +765,12 @@ void IN_Update()
 {
 	sdlwCheckEvents();
 	IN_PollControllerButtons();
+#if defined(AURORA_VR)
+	/* Сразу после опроса кнопок: долгое нажатие Y и автоповтор шага
+	   калибровки. Здесь, а не в IN_Move, — IN_Update идёт каждый кадр и
+	   в меню, и без подключения к серверу. */
+	VR_LensFrame();
+#endif
 
 #if defined(AURORA_OS)
 	Touch_Frame();
@@ -810,8 +816,20 @@ void IN_Move(usercmd_t *cmd)
 	/* Сенсоры головы: автоматы sensorfwd + разбор всех накопившихся
 	   семплов. Здесь, а не в главном цикле, потому что это уже точка
 	   сбора ввода и вызывается она ровно раз за кадр (CL_CreateCmd).
-	   На cl.viewangles модуль пока не влияет — это этап 3 плана. */
+	   В cl.viewangles голова пишется в конце функции (VR_ApplyHeadToView). */
 	VR_Frame();
+
+#if defined(AURORA_VR)
+	/* Калибровка линз: стики не двигают и не поворачивают игрока. Голову
+	   всё равно зовём — она сбросит базу дельты yaw, иначе повороты головы
+	   за время калибровки прилетели бы в камеру разом на выходе. */
+	if (VR_LensCalibrating())
+	{
+		l_mouseX = l_mouseY = 0;
+		VR_ApplyHeadToView();
+		return;
+	}
+#endif
 
     int mouseX = l_mouseX, mouseY = l_mouseY;
 	l_mouseX = l_mouseY = 0;
@@ -955,6 +973,14 @@ void IN_Move(usercmd_t *cmd)
         forwardDelta += cl_speed_forward->value * joyYFloat * running;
         cmd->forwardmove += forwardDelta;
     }
+
+#if defined(AURORA_VR)
+    /* Голова — последней, поверх мыши, стиков и тача: yaw головы ложится
+       дельтой на уже довёрнутый ими yaw тела, а pitch/roll выставляются
+       абсолютно (горизонт обязан совпадать с реальным). Дальше
+       CL_FinishMove сам сделает CL_ClampPitch и ANGLE2SHORT. */
+    VR_ApplyHeadToView();
+#endif
 }
 
 void IN_Init()

@@ -2,6 +2,9 @@
 #include "client/keyboard.h"
 #include "client/refresh/r_private.h"
 #include "client/refresh/r_fbo.h"
+#if defined(AURORA_VR)
+#include "client/vr_head.h"
+#endif
 #if defined(AURORA_OS)
 #include "client/cl_touch.h"
 #endif
@@ -3526,6 +3529,14 @@ static int R_AuroraComputeTransform(void)
 void R_AuroraUpdateTransform(void)
 {
 	int transform = R_AuroraComputeTransform();
+#if defined(AURORA_VR)
+	/* В шлеме устройство закреплено жёстко, а ориентацию композитор
+	   берёт из того же акселерометра: при наклоне головы к плечу он
+	   решит, что телефон повернули, и перевернёт картинку на 180°.
+	   VR_LockTransform держит выбор внутри пары (0/2, 1/3), но смену
+	   самой пары (перенос на другой дисплей) пропускает. */
+	transform = VR_LockTransform(transform);
+#endif
 	RFBO_SetRotation(transform);
 
 	if (l_auroraWlSurface == NULL)
@@ -4190,6 +4201,11 @@ static bool R_Window_update(bool forceFlag)
 					l_lastDisplayIndex, displayIndex);
 				R_AuroraUpdateTransform();
 				Touch_RefreshDpi();
+#if defined(AURORA_VR)
+				/* Другой дисплей — другой DPI: миллиметры калибровки линз
+				   пересчитываются в пиксели нового экрана. */
+				RFBO_RefreshDisplayMetrics();
+#endif
 			}
 			l_lastDisplayIndex = displayIndex;
 		}

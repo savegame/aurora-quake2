@@ -516,6 +516,190 @@ static void test_zupt( void )
 	check( with_zupt < 1.0f, "с ZUPT дрейф yaw, град/мин", with_zupt, 1.0 );
 }
 
+/* ------------------------------------------------------------------------
+ * 7. Смена rotation на лету (дефект с устройства: rot 3 -> 1 давал
+ *    yaw -160, roll +89 и секунды переходного процесса)
+ *
+ *    Фильтр ведёт оси КОРПУСА, маппинг в камеру — только на выходе.
+ *    Корпус при смене rotation не двигается, поэтому углы на выходе
+ *    обязаны сразу, со следующего семпла, отразить новый поворот
+ *    контента: 1 и 3 отличаются поворотом на 180° вокруг forward, то есть
+ *    pitch и yaw те же, roll + 180. Контроль — старая схема (маппинг до
+ *    фильтра) на тех же данных: у неё переходный процесс обязан быть.
+ * ---------------------------------------------------------------------- */
+
+/* Ориентация корпуса по ориентации камеры при данном rotation. Столбец j
+   матрицы корпуса = ось j устройства в мире = sum_k M[k][j] * ось k
+   камеры, где M — таблица VRM_MapAxes (камера = M * устройство). */
+static void cam_to_device_quat( const float angles[3], int rot, float q_dev[4] )
+{
+	float cam[3][3], dev[3][3];
+	int j, k, i;
+
+	q2_angle_vectors( angles, cam[0], cam[1], cam[2] );
+
+	for ( j = 0; j < 3; j++ )
+	{
+		float e[3] = { 0.0f, 0.0f, 0.0f };
+		float m[3];
+
+		e[j] = 1.0f;
+		VRM_MapAxes( rot, e, m ); /* m[k] = M[k][j] */
+		for ( i = 0; i < 3; i++ )
+		{
+			dev[j][i] = 0.0f;
+			for ( k = 0; k < 3; k++ )
+				dev[j][i] += m[k] * cam[k][i];
+		}
+	}
+	mat_to_quat( dev[0], dev[1], dev[2], q_dev );
+}
+
+static float max_angle_err( const float a[3], const float b[3] )
+{
+	float d = 0.0f;
+	int i;
+
+	for ( i = 0; i < 3; i++ )
+		if ( ang_diff( a[i], b[i] ) > d )
+			d = ang_diff( a[i], b[i] );
+	return d;
+}
+
+static void test_rotation_switch( void )
+{
+	/* Спокойная голова в шлеме: вдали от зенита, где yaw/roll вырождены. */
+	traj_t t = { 25.0f, 0.11f, 12.0f, 0.07f, 6.0f, 0.05f };
+	vrm_filter_t f, f_old;
+	vrm_params_t p;
+	float dt = 0.005f;
+	float q_prev[4], q_cur[4];
+	float angles[3], ideal[3], est[3], est_old[3];
+	const int rot_before = 3, rot_after = 1;
+	const float t_switch = 30.0f, t_end = 36.0f;
+	float err_before = 0.0f, err_first = 0.0f, err_after = 0.0f, err_old = 0.0f;
+	int step, steps = (int)( t_end / dt );
+	int i;
+
+	printf( "[7] смена rotation %d -> %d на лету: фильтр в осях корпуса\n",
+			rot_before, rot_after );
+
+	VRM_Reset( &f );
+	VRM_Reset( &f_old );
+	VRM_ParamsDefault( &p );
+
+	/* Корпус задан траекторией камеры при rot_before и дальше живёт сам:
+	   смена rotation его не поворачивает. */
+	traj_angles( &t, 0.0f, angles );
+	cam_to_device_quat( angles, rot_before, q_prev );
+	/* старт из истины: мерим не прогрев (он в пункте 4), а переключение */
+	memcpy( f.q, q_prev, sizeof( f.q ) );
+	/* старой схеме — та же фора: её кватернион живёт в осях камеры */
+	angles_to_quat( angles, f_old.q );
+
+	for ( step = 1; step < steps; step++ )
+	{
+		float time = step * dt;
+		float dx[3], dy[3], dz[3];
+		float w_dev[3], g_dev[3], w_cam[3], g_cam[3];
+		int rot = ( time < t_switch ) ? rot_before : rot_after;
+
+		traj_angles( &t, time, angles );
+		cam_to_device_quat( angles, rot_before, q_cur );
+		traj_omega( q_prev, q_cur, dt, w_dev );
+		memcpy( q_prev, q_cur, sizeof( q_prev ) );
+
+		/* мировой «вверх» в осях корпуса — третья строка его матрицы */
+		VRM_QuatAxes( q_cur, dx, dy, dz );
+		g_dev[0] = dx[2] * 1000.0f;
+		g_dev[1] = dy[2] * 1000.0f;
+		g_dev[2] = dz[2] * 1000.0f;
+
+		for ( i = 0; i < 3; i++ )
+			w_dev[i] += noise( VRM_DEG2RAD( 0.2f ) );
+
+		/* новая схема: сырые оси корпуса */
+		VRM_FeedAccel( &f, g_dev );
+		VRM_Step( &f, &p, w_dev, dt );
+		VRM_DeviceQuatToQ2Angles( f.q, rot, est );
+
+		/* старая схема: маппинг на входе, по текущему rotation */
+		VRM_MapAxes( rot, g_dev, g_cam );
+		VRM_MapAxes( rot, w_dev, w_cam );
+		VRM_FeedAccel( &f_old, g_cam );
+		VRM_Step( &f_old, &p, w_cam, dt );
+		VRM_QuatToQ2Angles( f_old.q, est_old );
+
+		/* Истина независимо от vr_math: до переключения — траектория,
+		   после — та же камера, повёрнутая на 180° вокруг forward. */
+		ideal[0] = angles[0];
+		ideal[1] = angles[1];
+		ideal[2] = ( rot == rot_before ) ? angles[2] : angles[2] + 180.0f;
+
+		if ( time < t_switch )
+		{
+			if ( time > t_switch - 5.0f && max_angle_err( est, ideal ) > err_before )
+				err_before = max_angle_err( est, ideal );
+		}
+		else
+		{
+			if ( step == (int)( t_switch / dt ) + 1 )
+				err_first = max_angle_err( est, ideal );
+			if ( max_angle_err( est, ideal ) > err_after )
+				err_after = max_angle_err( est, ideal );
+			if ( time > t_switch + 1.0f && max_angle_err( est_old, ideal ) > err_old )
+				err_old = max_angle_err( est_old, ideal );
+		}
+	}
+
+	printf( "       старая схема через 1-6 с после переключения: ошибка до %.1f град\n", err_old );
+	check( err_before < 2.0f, "до переключения, макс. ошибка углов, град", err_before, 2.0 );
+	check( err_first < 2.0f, "первый семпл после переключения, град", err_first, 2.0 );
+	check( err_after < 2.0f, "6 с после переключения, макс. ошибка, град", err_after, 2.0 );
+	check( err_old > 20.0f, "старая схема: переходный процесс есть (контроль)", err_old, 20.0 );
+}
+
+/* ------------------------------------------------------------------------
+ * 8. Затравка по акселерометру: горизонт сразу, без секунд прогрева
+ * ---------------------------------------------------------------------- */
+static void test_seed( void )
+{
+	float worst = 0.0f;
+	int p, r;
+
+	printf( "[8] затравка кватерниона по гравитации\n" );
+
+	for ( p = -75; p <= 75; p += 15 )
+	{
+		for ( r = -150; r <= 180; r += 30 )
+		{
+			float in[3] = { (float)p, 0.0f, (float)r };
+			float fwd[3], left[3], up[3], g[3], est[3];
+			vrm_filter_t f;
+			float d;
+
+			q2_angle_vectors( in, fwd, left, up );
+			g[0] = fwd[2] * 1000.0f;
+			g[1] = left[2] * 1000.0f;
+			g[2] = up[2] * 1000.0f;
+
+			VRM_Reset( &f );
+			VRM_SeedFromAccel( &f, g );
+			VRM_QuatToQ2Angles( f.q, est );
+
+			/* yaw затравкой не определяется — сравниваем pitch и roll */
+			d = ang_diff( est[0], in[0] );
+			if ( d > worst )
+				worst = d;
+			d = ang_diff( est[2], in[2] );
+			if ( d > worst )
+				worst = d;
+		}
+	}
+
+	check( worst < 0.05f, "pitch/roll сразу после затравки, град", worst, 0.05 );
+}
+
 int main( void )
 {
 	printf( "=== синтетический тест фильтра ориентации VR ===\n" );
@@ -526,6 +710,8 @@ int main( void )
 	test_convergence();
 	test_accel_gate();
 	test_zupt();
+	test_rotation_switch();
+	test_seed();
 
 	if ( g_failures == 0 )
 	{

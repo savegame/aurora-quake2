@@ -402,6 +402,10 @@ struct LauncherSettings
 	bool        sv_warmup = false; /* g_warmup */
 	bool        sv_votes  = true;  /* g_vote_mask: 35 = tl|fl|map, 0 = выкл */
 	int         sv_itemban = 0;    /* g_item_ban: 1 quad, 2 invuln, 4 BFG, 8 PA */
+#if defined(AURORA_VR)
+	/* Картонный VR: cvar vr_mode (стерео + голова управляет камерой). */
+	bool        vr_mode = false;
+#endif
 };
 
 LauncherSettings g_settings;
@@ -437,6 +441,9 @@ void LoadSettings()
 		else if( k == "sv_warmup" )      g_settings.sv_warmup = atoi( v.c_str()) != 0;
 		else if( k == "sv_votes" )       g_settings.sv_votes = atoi( v.c_str()) != 0;
 		else if( k == "sv_itemban" )     g_settings.sv_itemban = atoi( v.c_str());
+#if defined(AURORA_VR)
+		else if( k == "vr_mode" )        g_settings.vr_mode = atoi( v.c_str()) != 0;
+#endif
 	}
 	fclose( f );
 	if( g_settings.r_3d_scale < 0.25f ) g_settings.r_3d_scale = 0.25f;
@@ -465,6 +472,9 @@ void SaveSettings()
 	fprintf( f, "sv_warmup=%d\n",      g_settings.sv_warmup ? 1 : 0 );
 	fprintf( f, "sv_votes=%d\n",       g_settings.sv_votes ? 1 : 0 );
 	fprintf( f, "sv_itemban=%d\n",     g_settings.sv_itemban );
+#if defined(AURORA_VR)
+	fprintf( f, "vr_mode=%d\n",        g_settings.vr_mode ? 1 : 0 );
+#endif
 	fclose( f );
 }
 
@@ -914,6 +924,20 @@ void DrawTab_Settings()
 	ImGui::Dummy( ImVec2( 0, fs ));
 	ImGui::TextColored( ImVec4( 0.6f, 0.8f, 1.f, 1.f ),
 		"Текущее значение: %.2f", g_settings.r_3d_scale );
+
+#if defined(AURORA_VR)
+	/* Галочку ставят ДО того, как телефон уйдёт в держатель: в шлеме
+	   лаунчер нечитаем (research/vr_sensors.md §6.5). В движок уходит
+	   через env AURORA_VR_MODE -> cvar vr_mode (misc.c). */
+	ImGui::Dummy( ImVec2( 0, fs ));
+	ImGui::Separator();
+	ImGui::Dummy( ImVec2( 0, fs * 0.5f ));
+	ImGui::Checkbox( "VR (картон)", &g_settings.vr_mode );
+	ImGui::TextWrapped(
+		"Стереокартинка для картонного шлема, голова поворачивает камеру. "
+		"Управление — геймпадом, кнопка Y — рецентр. "
+		"В игре переключается командой vr_mode 0/1." );
+#endif
 }
 
 /* ---------------------------------------------------------------------------
@@ -1522,6 +1546,11 @@ extern "C" int Launcher_Run( void )
 		char scale_buf[32];
 		snprintf( scale_buf, sizeof( scale_buf ), "%.3f", g_settings.r_3d_scale );
 		setenv( "AURORA_R_3D_SCALE", scale_buf, 1 );
+#if defined(AURORA_VR)
+		/* И «0» тоже передаём: лаунчер — источник истины, снятая галочка
+		   обязана выключить VR, сохранённый в user.cfg. */
+		setenv( "AURORA_VR_MODE", g_settings.vr_mode ? "1" : "0", 1 );
+#endif
 
 		g_settings.path = g_picker.selected;
 		result = 0;

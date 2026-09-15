@@ -100,25 +100,41 @@ static inline void VRM_QuatNormalize( float q[4] )
 	q[3] *= n;
 }
 
-/*
- * Извлечение углов Quake 2 (§5.3). Кватернион переводит оси камеры в мир,
- * поэтому forward/left — это первые два столбца матрицы поворота.
- * Знак asinf(-fwd[2]) соответствует forward[2] = -sin(pitch) в
- * AngleVectors (shared.c), знак ROLL — left[2] = sin(roll).
- */
-static inline void VRM_QuatToQ2Angles( const float q[4], float angles[3] )
+/* Столбцы матрицы поворота кватерниона: куда в мире смотрят оси X/Y/Z
+   той системы, ориентацию которой q описывает. */
+static inline void VRM_QuatAxes( const float q[4], float ax[3], float ay[3], float az[3] )
 {
 	float w = q[0], x = q[1], y = q[2], z = q[3];
-	float fwd[3], left[3];
+
+	ax[0] = 1.0f - 2.0f * ( y * y + z * z );
+	ax[1] = 2.0f * ( x * y + w * z );
+	ax[2] = 2.0f * ( x * z - w * y );
+
+	ay[0] = 2.0f * ( x * y - w * z );
+	ay[1] = 1.0f - 2.0f * ( x * x + z * z );
+	ay[2] = 2.0f * ( y * z + w * x );
+
+	az[0] = 2.0f * ( x * z + w * y );
+	az[1] = 2.0f * ( y * z - w * x );
+	az[2] = 1.0f - 2.0f * ( x * x + y * y );
+}
+
+/*
+ * Углы Quake 2 из мировых векторов forward/left/up камеры.
+ * Знак asinf(-fwd[2]) соответствует forward[2] = -sin(pitch) в
+ * AngleVectors (shared.c).
+ *
+ * ROLL — через atan2(left[2], up[2]), а не asin(left[2] / cos(pitch)):
+ * left[2] = sin(roll)*cos(pitch), up[2] = cos(roll)*cos(pitch), и atan2
+ * даёт полный диапазон ±180. asin обрезал бы roll до ±90, и перевёрнутая
+ * камера (телефон вверх ногами, в логе с устройства roll «+89») читалась
+ * бы неверно. В зените оба аргумента -> 0, roll не определён, но pitch
+ * камеры всё равно зажимается 89 градусами уже в движке.
+ */
+static inline void VRM_AxesToQ2Angles( const float fwd[3], const float left[3],
+                                       const float up[3], float angles[3] )
+{
 	float cp, s;
-
-	fwd[0] = 1.0f - 2.0f * ( y * y + z * z );
-	fwd[1] = 2.0f * ( x * y + w * z );
-	fwd[2] = 2.0f * ( x * z - w * y );
-
-	left[0] = 2.0f * ( x * y - w * z );
-	left[1] = 1.0f - 2.0f * ( x * x + z * z );
-	left[2] = 2.0f * ( y * z + w * x );
 
 	s = fwd[2];
 	if ( s > 1.0f )
@@ -129,23 +145,53 @@ static inline void VRM_QuatToQ2Angles( const float q[4], float angles[3] )
 	angles[1] = VRM_RAD2DEG( atan2f( fwd[1], fwd[0] ) ); /* YAW   */
 	angles[0] = VRM_RAD2DEG( asinf( -s ) );              /* PITCH */
 
-	/* ROLL — из наклона вектора «влево» относительно горизонта. В зените
-	   он не определён (cos(pitch) -> 0), но pitch камеры всё равно
-	   зажимается 89 градусами уже в движке. */
 	cp = sqrtf( fwd[0] * fwd[0] + fwd[1] * fwd[1] );
 	if ( cp < 1e-4f )
-	{
 		angles[2] = 0.0f;
-	}
 	else
-	{
-		s = left[2] / cp;
-		if ( s > 1.0f )
-			s = 1.0f;
-		if ( s < -1.0f )
-			s = -1.0f;
-		angles[2] = VRM_RAD2DEG( asinf( s ) );
-	}
+		angles[2] = VRM_RAD2DEG( atan2f( left[2], up[2] ) ); /* ROLL */
+}
+
+/* Извлечение углов Quake 2 (§5.3) из кватерниона «оси камеры -> мир»:
+   forward/left/up — это столбцы его матрицы поворота. */
+static inline void VRM_QuatToQ2Angles( const float q[4], float angles[3] )
+{
+	float fwd[3], left[3], up[3];
+
+	VRM_QuatAxes( q, fwd, left, up );
+	VRM_AxesToQ2Angles( fwd, left, up, angles );
+}
+
+/*
+ * Углы камеры из ориентации КОРПУСА устройства. q — «оси устройства ->
+ * мир» (так его ведёт фильтр), rotation — текущий RFBO_GetRotation().
+ *
+ * Маппинг устройство -> камера стоит здесь, на выходе, а не на входе
+ * фильтра, и это исправление дефекта, пойманного на устройстве: при
+ * смене rotation (3 -> 1) кватернион фильтра оставался в старом базисе,
+ * смена строки таблицы выглядела для него мгновенным поворотом на 180°
+ * вокруг forward, и Махони гасил его секундами (yaw -160, roll +89).
+ * Корпус при смене rotation физически не поворачивается — значит и
+ * состояние фильтра меняться не должно; меняется только то, какая ось
+ * корпуса сейчас считается «влево» и «вверх» для глаза.
+ *
+ * Строка таблицы m[k] = (axis, sign) говорит: k-я ось камеры равна
+ * sign * (ось axis устройства). В мире ось устройства — столбец матрицы
+ * q, отсюда forward/left/up камеры без промежуточных кватернионов.
+ */
+static inline void VRM_DeviceQuatToQ2Angles( const float q[4], int rotation, float angles[3] )
+{
+	const vrm_axis_map_t *m = vrm_axis_maps[rotation & 3];
+	float dev[3][3], cam[3][3];
+	int k, i;
+
+	VRM_QuatAxes( q, dev[0], dev[1], dev[2] );
+
+	for ( k = 0; k < 3; k++ )
+		for ( i = 0; i < 3; i++ )
+			cam[k][i] = m[k].sign * dev[m[k].axis][i];
+
+	VRM_AxesToQ2Angles( cam[0], cam[1], cam[2], angles );
 }
 
 /*
@@ -196,12 +242,19 @@ static inline void VRM_AccelToPitchRoll( const float g[3], float *pitch_deg, flo
  * Фильтр Махони (§5.2, §5.3)
  * ---------------------------------------------------------------------- */
 
+/*
+ * Фильтр не знает, в каких он осях: он ведёт ориентацию той системы, в
+ * которой ему дают гироскоп и акселерометр. vr_head.c кормит его осями
+ * КОРПУСА устройства и маппит в оси камеры только на выходе
+ * (VRM_DeviceQuatToQ2Angles) — см. там, почему. Тест vr_filter_test.c в
+ * пунктах 4-6 кормит осями камеры: для математики фильтра это одно и то же.
+ */
 typedef struct
 {
-	float q[4];        /* ориентация головы: оси камеры -> мир */
+	float q[4];        /* ориентация: оси входных данных -> мир */
 	float integral[3]; /* интегратор PI-звена = оценка -bias, рад/с */
 
-	float accel[3];    /* последний акселерометр в осях камеры, сырые ед. */
+	float accel[3];    /* последний акселерометр, сырые ед. */
 	float accel_norm;  /* его длина */
 	float gravity_ref; /* длина вектора g в тех же сырых единицах */
 	int   have_accel;
@@ -265,7 +318,50 @@ static inline void VRM_ParamsDefault( vrm_params_t *p )
 	p->zupt = 1;
 }
 
-/* Семпл акселерометра, уже переведённый в оси камеры. */
+/*
+ * Затравка: выставить q так, чтобы оценка «вверх» совпала с измеренной
+ * гравитацией. yaw остаётся произвольным — гравитация его не содержит.
+ * Без затравки фильтр стартует из единичного кватерниона и тянет горизонт
+ * с постоянной времени ~1/Kp секунд; в камере, где pitch головы
+ * абсолютный, это выглядело бы как медленно «приезжающий» горизонт.
+ *
+ * Нужен поворот R с R^T*(0,0,1) = g/|g|, то есть R переводит g_n в ось Z
+ * мира. Кратчайший поворот вектора a в b: q = норм.(1 + a·b, a × b); для
+ * b = (0,0,1) это (1 + g_z, g_y, -g_x, 0). При g_n ~ (0,0,-1) (вверх
+ * ногами) формула вырождается — тогда 180° вокруг X.
+ * Возвращает 0, если вектор нулевой.
+ */
+static inline int VRM_SeedFromAccel( vrm_filter_t *f, const float a[3] )
+{
+	float n = sqrtf( a[0] * a[0] + a[1] * a[1] + a[2] * a[2] );
+	float gx, gy, gz;
+
+	if ( n < 1e-6f )
+		return 0;
+
+	gx = a[0] / n;
+	gy = a[1] / n;
+	gz = a[2] / n;
+
+	if ( gz < -0.9999f )
+	{
+		f->q[0] = 0.0f;
+		f->q[1] = 1.0f;
+		f->q[2] = 0.0f;
+		f->q[3] = 0.0f;
+	}
+	else
+	{
+		f->q[0] = 1.0f + gz;
+		f->q[1] = gy;
+		f->q[2] = -gx;
+		f->q[3] = 0.0f;
+		VRM_QuatNormalize( f->q );
+	}
+	return 1;
+}
+
+/* Семпл акселерометра (в тех же осях, что и гироскоп для VRM_Step). */
 static inline void VRM_FeedAccel( vrm_filter_t *f, const float a_cam[3] )
 {
 	float n = sqrtf( a_cam[0] * a_cam[0] + a_cam[1] * a_cam[1] + a_cam[2] * a_cam[2] );
@@ -312,8 +408,9 @@ static inline int VRM_AccelTrustworthy( const vrm_filter_t *f, const vrm_params_
 }
 
 /*
- * Шаг фильтра на один семпл гироскопа. w_cam — угловая скорость в осях
- * камеры, рад/с, с уже вычтенным аппаратным bias'ом. dt — секунды.
+ * Шаг фильтра на один семпл гироскопа. w_cam — угловая скорость, рад/с,
+ * в тех же осях, что и акселерометр (в vr_head.c — оси корпуса), с уже
+ * вычтенным аппаратным bias'ом. dt — секунды.
  */
 static inline void VRM_Step( vrm_filter_t *f, const vrm_params_t *p,
                              const float w_cam[3], float dt )

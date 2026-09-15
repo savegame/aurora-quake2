@@ -44,6 +44,9 @@
 
 #include "client/client.h"
 #include "client/refresh/r_private.h"
+#if defined(AURORA_VR)
+#include "client/vr_head.h"
+#endif
 
 static cvar_t *cfg_unbindall;
 
@@ -968,6 +971,13 @@ void Key_Event(int key, bool down)
 
 	/* Track if key is down */
 	keydown[key] = down;
+
+#if defined(AURORA_VR)
+	/* Калибровка линз забирает нажатия раньше всего остального: иначе
+	   D-pad выкидывал бы предметы, а START/ESC открывал меню. */
+	if (VR_LensKeyEvent(key, down))
+		return;
+#endif
 
 	if (down)
 	{

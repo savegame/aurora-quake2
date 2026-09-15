@@ -26,6 +26,9 @@
 
 #include <math.h>
 #include "client/client.h"
+#if defined(AURORA_VR)
+#include "client/vr_head.h"
+#endif
 
 extern struct model_s *cl_mod_powerscreen;
 
@@ -762,6 +765,12 @@ void CL_CalcViewValues()
 		}
 	}
 
+#if defined(AURORA_VR)
+	/* kick_angles — отдача, урон, покачивание при ходьбе (game/player/view.c).
+	   В шлеме это чужое движение головы, которого вестибулярка не
+	   чувствует: прямой путь к укачиванию. В VR-режиме не добавляем. */
+	if (!VR_ModeEnabled())
+#endif
 	for (i = 0; i < 3; i++)
 	{
 		cl.refdef.viewangles[i] += LerpAngle(ops->kick_angles[i],

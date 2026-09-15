@@ -262,6 +262,12 @@ if(AURORA_VR_ENABLED AND NOT CMAKE_CROSSCOMPILING)
     add_executable(vr_filter_test tests/vr_filter_test.c)
     target_include_directories(vr_filter_test PRIVATE src/quake2/client)
     target_link_libraries(vr_filter_test m)
+
+    # Раскладка глаз под линзы (vr_lens.h): мм <-> NDC контента, обрезка
+    # внутренних краёв, соответствие UV позициям.
+    add_executable(vr_lens_test tests/vr_lens_test.c)
+    target_include_directories(vr_lens_test PRIVATE src/quake2/client)
+    target_link_libraries(vr_lens_test m)
 endif()
 
 # --- Миссион-пакеты (game.so) ----------------------------------------------

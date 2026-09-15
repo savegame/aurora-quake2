@@ -274,6 +274,19 @@ static void Qcommon_Init(int argc, char **argv)
 	Cbuf_AddText("exec platform.cfg\n"); // platform.cfg is a platform specific file which is only read. It is generally on the file system, in the game directory.
 	Cbuf_AddText("exec user.cfg\n"); // user.cfg is the user file, which is read and written in a subdirectory of the system home (user) directory.
 
+#if defined(AURORA_OS) && defined(AURORA_VR)
+	/* Галочка «VR (картон)» из лаунчера. В отличие от AURORA_GAME_MOD, её
+	   нельзя выставить ранним Cvar_Get: vr_mode архивный, и exec user.cfg
+	   выше затёр бы выбор лаунчера сохранённым значением. Поэтому ставим
+	   в очередь ПОСЛЕ конфигов; +set vr_mode из командной строки идёт
+	   ещё позже (Cbuf_AddEarlyCommands ниже) и по-прежнему главнее. */
+	{
+		char *vr = getenv("AURORA_VR_MODE");
+		if (vr != NULL && (vr[0] == '0' || vr[0] == '1') && vr[1] == '\0')
+			Cbuf_AddText(va("set vr_mode %s\n", vr));
+	}
+#endif
+
 	Cbuf_AddEarlyCommands(true);
 	Cbuf_Execute();
 

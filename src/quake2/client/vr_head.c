@@ -16,13 +16,20 @@
  *    семплы дают ошибку, пропорциональную угловому ускорению, то есть
  *    ровно на быстрых поворотах головы (research/vr_sensors.md §3.4).
  *
- * 3. Маппинг осей идёт от RFBO_GetRotation() — того самого transform,
- *    которым повёрнут выводимый на экран квад. Это единственная величина,
- *    гарантированно согласованная с тем, что видит глаз: в ней уже сведены
- *    и системная ориентация, и тип панели, и текущий дисплей (§4.4, §4.6).
+ * 3. Фильтр ведёт ориентацию КОРПУСА, в сырых осях устройства. Маппинг
+ *    осей в камеру идёт от RFBO_GetRotation() — того самого transform,
+ *    которым повёрнут выводимый на экран квад (§4.4, §4.6), — и
+ *    применяется только на выходе, при получении углов. Раньше маппинг
+ *    стоял на входе фильтра, и смена rotation на устройстве давала скачок
+ *    yaw -160 / roll +89 с секундами переходного процесса: для фильтра
+ *    смена строки таблицы выглядела как поворот корпуса на 180°.
  *
- * 4. Камера не трогается: ни cl.viewangles, ни cl.refdef.viewangles.
- *    Это этап 3 плана, сюда он намеренно не входит.
+ * 4. Камера: голова идёт в cl.viewangles (§6.1), поэтому стрельба и
+ *    движение совпадают с направлением взгляда. YAW — дельтой между
+ *    кадрами (стик/тач/мышь доворачивают тело поверх головы, сервер
+ *    свободно выставляет углы при телепорте/респауне через delta_angles),
+ *    PITCH и ROLL — абсолютно относительно горизонта (см.
+ *    VR_ApplyHeadToView).
  *
  * Про язык сообщений: комментарии русские, а выводимые строки — латиница.
  * Не вкусовщина: шрифт движка (conchars) индексируется байтом, кириллица в
@@ -45,7 +52,9 @@
 
 /* --- cvar'ы ------------------------------------------------------------ */
 
-static cvar_t *vr_enabled;    /* гейт сессий сенсоров */
+static cvar_t *vr_mode;       /* VR-режим целиком: стерео + сенсоры + камера */
+static cvar_t *vr_stereo_prev;/* gl_stereo до включения vr_mode, -1 = не сохранён */
+static cvar_t *vr_enabled;    /* гейт сессий сенсоров без стерео и камеры */
 static cvar_t *vr_debug;      /* 0 выкл, 1 оверлей, 2 + сырые показания */
 static cvar_t *vr_log;        /* строка в консоль раз в секунду */
 static cvar_t *vr_interval_ms;
@@ -75,6 +84,11 @@ typedef enum
 /* Сколько результатов «поворот на 90°» помним, чтобы считать разброс. */
 #define VR_CAL_HISTORY 8
 
+/* Больше этого yaw головы за один кадр измениться не может физически
+   (90° за 16 мс — это 5600 °/с). Такой скачок — разрыв ветви углов Эйлера
+   при переходе взгляда через зенит/надир, а не движение. */
+#define VR_YAW_JUMP_DEG 90.0f
+
 typedef struct
 {
 	bool              inited;    /* VR_Init прошёл (в dedicated его нет) */
@@ -83,13 +97,24 @@ typedef struct
 	bool              created;   /* клиенты созданы (dbus_bus_get сделан) */
 	int               interval_applied;
 
-	vrm_filter_t      f;
+	vrm_filter_t      f;         /* ориентация КОРПУСА, оси устройства */
 	vrm_params_t      params;
+	bool              seeded;    /* кватернион выставлен по гравитации */
 
 	int               rotation;  /* RFBO_GetRotation() на текущем кадре */
 
 	uint64_t          gyro_ts;   /* timestamp предыдущего семпла, мкс */
 	float             yaw_offset;
+
+	/* VR-режим */
+	bool              mode_applied;  /* vr_mode, применённый к gl_stereo */
+	bool              lock_valid;    /* выбор внутри пары rotation зафиксирован */
+	int               lock_transform;
+
+	/* Камера */
+	bool              cam_valid;     /* cam_prev_yaw — база для дельты */
+	float             cam_prev_yaw;
+	bool              cam_driving;   /* на прошлом кадре голова писала углы */
 
 	float             raw_gyro[3];  /* последние сырые значения, для отладки */
 	float             raw_accel[3];
@@ -121,20 +146,28 @@ static vr_state_t vr;
 /*
  * Вектор в осях устройства -> вектор в осях камеры Quake 2. Источник
  * истины — RFBO_GetRotation(), все четыре строки таблицы §4.4 лежат в
- * vr_math.h. Значение кэшируется раз в кадр (VR_Frame), чтобы семплы
- * одного кадра не разъехались по разным строкам таблицы, если система
- * решит повернуть экран прямо между ними.
+ * vr_math.h. Значение кэшируется раз в кадр (VR_Frame), чтобы семплы и
+ * углы одного кадра не разъехались по разным строкам таблицы.
+ *
+ * В фильтр мапленые векторы больше НЕ идут (см. п.3 в шапке): здесь
+ * остались только калибровка tilt и отладочный вывод наклона.
  */
 static void VR_MapDeviceToCamera( const float d[3], float out[3] )
 {
 	VRM_MapAxes( vr.rotation, d, out );
 }
 
+/* Углы камеры по текущему rotation, без рецентра. */
+static void VR_CameraAngles( float a[3] )
+{
+	VRM_DeviceQuatToQ2Angles( vr.f.q, vr.rotation, a );
+}
+
 /* --- колбэки сенсоров -------------------------------------------------- */
 
 static void VR_AccelSample( void *ud, uint64_t ts_us, float x, float y, float z )
 {
-	float raw[3], cam[3];
+	float raw[3];
 
 	(void)ud;
 	(void)ts_us;
@@ -148,13 +181,26 @@ static void VR_AccelSample( void *ud, uint64_t ts_us, float x, float y, float z 
 	vr.raw_accel[2] = z;
 	vr.accel_n++;
 
-	VR_MapDeviceToCamera( raw, cam );
-	VRM_FeedAccel( &vr.f, cam );
+	/* Первый семпл после старта или паузы: горизонт берём сразу из
+	   гравитации. Иначе Махони с Kp 0.5 тянул бы его секундами из
+	   единичного кватерниона — а pitch головы в камере абсолютный, и
+	   игрок видел бы, как горизонт медленно «приезжает». */
+	if ( !vr.seeded )
+	{
+		VRM_Reset( &vr.f );
+		if ( VRM_SeedFromAccel( &vr.f, raw ) )
+		{
+			vr.seeded = true;
+			vr.cam_valid = false;
+		}
+	}
+
+	VRM_FeedAccel( &vr.f, raw );
 }
 
 static void VR_GyroSample( void *ud, uint64_t ts_us, float x, float y, float z )
 {
-	float raw[3], corr[3], w_cam[3];
+	float raw[3], corr[3], w[3];
 	float dt, scale;
 	int i;
 
@@ -206,20 +252,26 @@ static void VR_GyroSample( void *ud, uint64_t ts_us, float x, float y, float z )
 		vr.cal_n++;
 	}
 
-	VR_MapDeviceToCamera( corr, w_cam );
-
 	scale = vr_gyro_scale->value; /* сырые ед. -> °/с */
 	for ( i = 0; i < 3; i++ )
-		w_cam[i] *= scale;
+		w[i] = corr[i] * scale;
 
-	/* Кросс-проверка (§3.3 шаг 2): PITCH растёт как +w_left (§4.4). */
+	/* Кросс-проверка (§3.3 шаг 2): PITCH растёт как +w_left (§4.4), а
+	   «влево» — понятие камеры, поэтому здесь маппинг нужен. */
 	if ( vr.cal_mode == VRCAL_TILT )
+	{
+		float w_cam[3];
+
+		VR_MapDeviceToCamera( w, w_cam );
 		vr.cal_pitch_gyro += w_cam[1] * dt;
+	}
 
 	for ( i = 0; i < 3; i++ )
-		w_cam[i] = VRM_DEG2RAD( w_cam[i] );
+		w[i] = VRM_DEG2RAD( w[i] );
 
-	VRM_Step( &vr.f, &vr.params, w_cam, dt );
+	/* Без затравки не интегрируем: кватернион ещё не знает, где верх. */
+	if ( vr.seeded )
+		VRM_Step( &vr.f, &vr.params, w, dt );
 }
 
 /* --- вспомогательное --------------------------------------------------- */
@@ -237,9 +289,12 @@ static float VR_NormalizeAngle( float a )
    отладкой; вернёт false, пока акселерометр не дал ни одного семпла. */
 static bool VR_AccelAngles( float *pitch, float *roll )
 {
+	float g_cam[3];
+
 	if ( !vr.f.have_accel )
 		return false;
-	VRM_AccelToPitchRoll( vr.f.accel, pitch, roll );
+	VR_MapDeviceToCamera( vr.f.accel, g_cam );
+	VRM_AccelToPitchRoll( g_cam, pitch, roll );
 	return true;
 }
 
@@ -260,12 +315,22 @@ static char *VR_SensorLine( sensorfw_async_t *c, char *label )
 
 /* --- команды ----------------------------------------------------------- */
 
+/*
+ * Рецентр: «куда смотрю сейчас — там yaw головы 0».
+ *
+ * Камеру он НЕ поворачивает: yaw в cl.viewangles идёт дельтой
+ * (VR_ApplyHeadToView), и направление тела в игре от абсолютного yaw
+ * головы не зависит. Нулевая точка нужна vr_status/vr_debug и будущему
+ * раздельному yaw тела (§6.4). База дельты сбрасывается, чтобы смена
+ * yaw_offset не прошла в камеру скачком.
+ */
 static void VR_Recenter_f( void )
 {
 	float a[3];
 
-	VRM_QuatToQ2Angles( vr.f.q, a );
+	VR_CameraAngles( a );
 	vr.yaw_offset = a[1];
+	vr.cam_valid = false;
 	Com_Printf( "vr: recentered, yaw_offset = %.1f\n", vr.yaw_offset );
 }
 
@@ -284,22 +349,27 @@ static void VR_Status_f( void )
 {
 	float a[3], ap = 0.0f, ar = 0.0f;
 
-	VRM_QuatToQ2Angles( vr.f.q, a );
+	VR_CameraAngles( a );
 
 	Com_Printf( "---- vr_status ----\n" );
+	Com_Printf( "vr_mode %d (applied %d), gl_stereo %d, saved gl_stereo %d\n",
+			(int)vr_mode->value, (int)vr.mode_applied,
+			(int)Cvar_VariableValue( "gl_stereo" ), (int)vr_stereo_prev->value );
 	Com_Printf( "vr_enabled %d, clients %s\n", (int)vr_enabled->value,
 			vr.created ? "created" : "not created" );
 	Com_Printf( "%s\n", VR_SensorLine( vr.gyro, "gyro " ) );
 	Com_Printf( "%s\n", VR_SensorLine( vr.accel, "accel" ) );
 	Com_Printf( "rate: gyro %.0f Hz, accel %.0f Hz (requested %d ms)\n",
 			vr.gyro_hz, vr.accel_hz, (int)vr_interval_ms->value );
-	Com_Printf( "RFBO_GetRotation() = %d  (axis-table row, report 4.4)\n", vr.rotation );
+	Com_Printf( "RFBO_GetRotation() = %d  (axis-table row, report 4.4), lock %s %d\n",
+			vr.rotation, vr.lock_valid ? "on" : "off", vr.lock_transform );
 	Com_Printf( "head angles: pitch %.1f yaw %.1f roll %.1f (yaw_offset %.1f)\n",
 			a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2], vr.yaw_offset );
+	Com_Printf( "camera: %s\n", vr.cam_driving ? "driven by head" : "not driven" );
 	if ( VR_AccelAngles( &ap, &ar ) )
 		Com_Printf( "from accel: pitch %.1f roll %.1f, |a| %.0f, g_ref %.0f\n",
 				ap, ar, vr.f.accel_norm, vr.f.gravity_ref );
-	Com_Printf( "filter bias estimate: %.3f %.3f %.3f dps (camera axes)\n",
+	Com_Printf( "filter bias estimate: %.3f %.3f %.3f dps (device axes)\n",
 			VRM_RAD2DEG( vr.f.integral[0] ), VRM_RAD2DEG( vr.f.integral[1] ),
 			VRM_RAD2DEG( vr.f.integral[2] ) );
 	Com_Printf( "vr_gyro_scale %.6g, bias %.2f %.2f %.2f\n",
@@ -451,8 +521,11 @@ static void VR_CalReset( void )
 
 	vr.cal_mode = VRCAL_NONE;
 	vr.cal_n = 0;
-	vr.cal_hist_n = 0;
 	vr.cal_pitch_gyro = 0.0f;
+	/* cal_hist_n здесь НЕ трогаем: историю замеров копит серия повторных
+	   rotate (§3.3 требует 5 заходов с разбросом < 3 %), а каждый заход
+	   начинается с VR_CalReset. Обнуление здесь делало серию невозможной —
+	   runs всегда оставался 1. Сбрасывает историю только vr_calibrate reset. */
 	for ( i = 0; i < 3; i++ )
 	{
 		vr.cal_sum[i] = 0.0;
@@ -520,7 +593,10 @@ static void VR_Calibrate_f( void )
 	else if ( !Q_stricmp( mode, "reset" ) )
 	{
 		VR_CalReset();
+		vr.cal_hist_n = 0;
 		VRM_Reset( &vr.f );
+		vr.seeded = false;
+		vr.cam_valid = false;
 		vr.yaw_offset = 0.0f;
 		vr.gyro_ts = 0;
 		Com_Printf( "vr_calibrate: filter and measurement history reset\n" );
@@ -537,8 +613,8 @@ static void VR_Calibrate_f( void )
  * Создание клиентов делает один синхронный dbus_bus_get() (асинхронного
  * у libdbus нет). Собеседник там — dbus-daemon, а не sensorfwd, то есть
  * он всегда запущен и всегда отвечает; но в кадре этому всё равно не
- * место. Поэтому создаём ровно дважды: на старте, если vr_enabled уже
- * стоял в конфиге, и в момент, когда пользователь сам переключил cvar.
+ * место. Поэтому создаём ровно дважды: на старте, если vr_enabled/vr_mode
+ * уже стояли, и в момент, когда пользователь сам переключил cvar.
  */
 static void VR_CreateClients( void )
 {
@@ -574,6 +650,109 @@ static void VR_DestroyClients( void )
 	vr.created = false;
 }
 
+/* --- VR-режим ---------------------------------------------------------- */
+
+/*
+ * Применение vr_mode. Вызывается только на смене значения, поэтому ручная
+ * правка gl_stereo во время VR не перетирается каждый кадр.
+ *
+ * Прежний gl_stereo хранится в АРХИВНОМ vr_stereo_prev, а не в статике:
+ * vr_mode тоже архивный, и после выхода из игры во включённом VR в
+ * user.cfg окажутся gl_stereo 2 и vr_mode 1. Статика на следующем старте
+ * «запомнила» бы 2 как прежнее значение, и выключение VR оставило бы
+ * сплит навсегда. -1 — «ничего не сохранено».
+ */
+static void VR_ApplyMode( bool on )
+{
+	if ( on )
+	{
+		if ( vr_stereo_prev->value < 0.0f )
+			Cvar_SetValue( "vr_stereo_prev", Cvar_VariableValue( "gl_stereo" ) );
+		Cvar_SetValue( "gl_stereo", 2 ); /* STEREO_SPLIT_HORIZONTAL, §2.2 */
+
+		VR_CreateClients();
+
+		/* Фиксируем то, что пользователь видит в момент включения: с этим
+		   поворотом он и вставит телефон в держатель. */
+		vr.lock_transform = RFBO_GetRotation();
+		vr.lock_valid = true;
+		vr.cam_valid = false;
+		Com_Printf( "vr: mode on (gl_stereo 2, screen rotation locked at %d)\n", vr.lock_transform );
+	}
+	else
+	{
+		if ( vr_stereo_prev->value >= 0.0f )
+		{
+			Cvar_SetValue( "gl_stereo", vr_stereo_prev->value );
+			Cvar_Set( "vr_stereo_prev", "-1" );
+		}
+
+		vr.lock_valid = false;
+		vr.mode_applied = false; /* до R_AuroraUpdateTransform: иначе лок вернёт старый поворот */
+#if defined(AURORA_FBO)
+		/* Пока VR был включён, системные повороты внутри пары
+		   игнорировались — догоняем фактическую ориентацию. */
+		R_AuroraUpdateTransform();
+#endif
+		Com_Printf( "vr: mode off (gl_stereo %d)\n", (int)Cvar_VariableValue( "gl_stereo" ) );
+	}
+
+	vr.mode_applied = on;
+}
+
+/*
+ * Нужно ли фиксировать выбор внутри пары rotation — да.
+ *
+ * R_AuroraComputeTransform для ландшафтной игры выдаёт только 1/3 на
+ * портретной панели и только 0/2 на ландшафтной: пара определяется типом
+ * панели, а системная ориентация выбирает внутри неё. Систему в шлеме
+ * обмануть легко: голова к плечу градусов на 60 — и акселерометр
+ * композитора видит «портрет», которому на портретной панели
+ * соответствует другой элемент той же пары. Картинка в шлеме
+ * переворачивается вверх ногами, глаза меняются местами.
+ *
+ * Поэтому внутри пары держим то, что было при включении. Смену пары
+ * пропускаем: она означает другой дисплей или другой тип панели
+ * (SDL_WINDOWEVENT_DISPLAY_CHANGED), и там без пересчёта сломаются и
+ * вывод, и размер FBO, и маппинг осей. Тип панели здесь не выводится —
+ * пару даёт само значение transform (младший бит).
+ */
+int VR_LockTransform( int transform )
+{
+	if ( !vr.inited || !vr.mode_applied )
+		return transform;
+
+	if ( !vr.lock_valid || ( ( transform ^ vr.lock_transform ) & 1 ) != 0 )
+	{
+		if ( vr.lock_valid )
+			Com_Printf( "vr: display changed, rotation pair %d -> %d, relocked\n",
+					vr.lock_transform, transform );
+		vr.lock_transform = transform;
+		vr.lock_valid = true;
+	}
+	else if ( transform != vr.lock_transform )
+	{
+		Com_Printf( "vr: system flip to %d ignored, keeping %d\n", transform, vr.lock_transform );
+	}
+
+	return vr.lock_transform;
+}
+
+bool VR_ModeEnabled( void )
+{
+	return vr.inited && vr.mode_applied;
+}
+
+/* Умолчание для рецентра: Y — единственная лицевая кнопка, не занятая в
+   platform.cfg. Ставим только если она пуста, чтобы не перетирать бинд
+   пользователя. В platform.cfg не кладём: он общий и для сборки без VR,
+   где vr_recenter не существует. */
+static void VR_DefaultBinds( void )
+{
+	if ( keybindings[K_GAMEPAD_Y] == NULL || keybindings[K_GAMEPAD_Y][0] == '\0' )
+		Key_SetBinding( K_GAMEPAD_Y, "vr_recenter" );
+}
+
 /* --- публичный API ----------------------------------------------------- */
 
 void VR_Init( void )
@@ -582,6 +761,8 @@ void VR_Init( void )
 	VRM_Reset( &vr.f );
 	VRM_ParamsDefault( &vr.params );
 
+	vr_mode = Cvar_Get( "vr_mode", "0", CVAR_ARCHIVE );
+	vr_stereo_prev = Cvar_Get( "vr_stereo_prev", "-1", CVAR_ARCHIVE );
 	vr_enabled = Cvar_Get( "vr_enabled", "0", CVAR_ARCHIVE );
 	vr_debug = Cvar_Get( "vr_debug", "0", 0 );
 	vr_log = Cvar_Get( "vr_log", "0", 0 );
@@ -590,9 +771,13 @@ void VR_Init( void )
 	   Значение best-effort, демон вправе прижать к своей сетке. */
 	vr_interval_ms = Cvar_Get( "vr_interval_ms", "5", CVAR_ARCHIVE );
 
-	/* Главная неизвестная величина всего проекта. 0.001 — гипотеза
-	   «милли-градусы в секунду» по симметрии с акселерометром; проверяется
-	   командой vr_calibrate (§3.3). */
+	/* Сырые единицы гироскопа sensorfwd — милли-градусы в секунду, это не
+	   гипотеза, а цепочка из исходников: hybris-адаптер sensorfw пишет
+	   rad/s из Android HAL как x * RADIANS_TO_DEGREES * 1000, а QtSensors
+	   (sensorfwgyroscope.cpp) обратно умножает на MILLI = 0.001 и получает
+	   °/с. Заводская калибровка живёт ниже, в вендорском HAL, поэтому
+	   множитель фиксированный. Cvar оставлен на случай устройства с иным
+	   адаптером; vr_calibrate rotate его перепроверяет. */
 	vr_gyro_scale = Cvar_Get( "vr_gyro_scale", "0.001", CVAR_ARCHIVE );
 	vr_gyro_bias_x = Cvar_Get( "vr_gyro_bias_x", "0", CVAR_ARCHIVE );
 	vr_gyro_bias_y = Cvar_Get( "vr_gyro_bias_y", "0", CVAR_ARCHIVE );
@@ -610,11 +795,22 @@ void VR_Init( void )
 	Cmd_AddCommand( "vr_status", VR_Status_f );
 	Cmd_AddCommand( "vr_retry", VR_Retry_f );
 
+	VR_DefaultBinds();
+	VR_LensInit();
+
 	vr.hz_last_ms = Sys_Milliseconds();
 	vr.inited = true;
 
 	if ( vr_enabled->value )
 		VR_CreateClients();
+
+	/* Рендер к этому моменту уже поднят (R_initialize в CL_Init идёт
+	   раньше), так что применить режим можно сразу: первый же кадр
+	   выйдет в стерео, а не моргнёт моно-кадром. */
+	if ( vr_mode->value )
+		VR_ApplyMode( true );
+	else if ( vr_stereo_prev->value >= 0.0f )
+		VR_ApplyMode( false ); /* VR выключили до старта (лаунчер): вернуть gl_stereo */
 
 	vr_enabled->modified = false;
 }
@@ -632,15 +828,22 @@ void VR_Shutdown( void )
 	Cmd_RemoveCommand( "vr_calibrate" );
 	Cmd_RemoveCommand( "vr_status" );
 	Cmd_RemoveCommand( "vr_retry" );
+	VR_LensShutdown();
 }
 
 void VR_Frame( void )
 {
-	bool gate;
+	bool gate, mode;
 	int now, interval;
 
 	if ( !vr.inited )
 		return;
+
+	/* Переключение режима из консоли: сравнение со значением, а не флаг
+	   modified, — флаг могли сбросить посторонние, а значение надёжно. */
+	mode = ( vr_mode->value != 0.0f );
+	if ( mode != vr.mode_applied )
+		VR_ApplyMode( mode );
 
 	/* Переключение cvar'а — это явное действие пользователя, а не
 	   покадровый путь: создать клиентов здесь можно (см. VR_CreateClients). */
@@ -676,7 +879,7 @@ void VR_Frame( void )
 		sensorfw_async_set_interval_ms( vr.accel, interval );
 	}
 
-	gate = ( vr_enabled->value != 0.0f );
+	gate = ( vr_enabled->value != 0.0f ) || mode;
 
 	/* set_wanted + pump раз в кадр, безусловно: pump двигает автомат,
 	   в том числе backoff и корректный teardown при закрытом гейте. */
@@ -688,8 +891,11 @@ void VR_Frame( void )
 	if ( !gate )
 	{
 		/* Гейт закрыт: следующий семпл после повторного включения придёт
-		   с чужим timestamp — dt по нему считать нельзя. */
+		   с чужим timestamp — dt по нему считать нельзя. И ориентация к
+		   тому времени устареет: телефон могли как угодно перевернуть,
+		   поэтому горизонт заново берётся затравкой. */
 		vr.gyro_ts = 0;
+		vr.seeded = false;
 		return;
 	}
 
@@ -709,7 +915,7 @@ void VR_Frame( void )
 		{
 			float a[3];
 
-			VRM_QuatToQ2Angles( vr.f.q, a );
+			VR_CameraAngles( a );
 			Com_Printf( "vr: rot=%d pitch %+6.1f yaw %+6.1f roll %+6.1f | gyro %.0f Hz accel %.0f Hz | raw w=(%.0f %.0f %.0f) a=(%.0f %.0f %.0f)\n",
 					vr.rotation, a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2],
 					vr.gyro_hz, vr.accel_hz,
@@ -730,8 +936,88 @@ bool VR_Active( void )
 
 void VR_GetHeadAngles( float angles[3] )
 {
-	VRM_QuatToQ2Angles( vr.f.q, angles );
+	VR_CameraAngles( angles );
 	angles[1] = VR_NormalizeAngle( angles[1] - vr.yaw_offset );
+}
+
+/* delta_angles сервера в диапазоне ±180 — как в CL_ClampPitch. */
+static float VR_ServerDelta( int axis )
+{
+	float d = SHORT2ANGLE( cl.frame.playerstate.pmove.delta_angles[axis] );
+
+	if ( d > 180.0f )
+		d -= 360.0f;
+	return d;
+}
+
+/*
+ * Голова -> cl.viewangles.
+ *
+ * YAW — дельтой. Абсолютный yaw головы вписывать нельзя: он затёр бы
+ * доворот тела стиком/тачем/мышью, а yaw тела в игре складывается ещё и
+ * из delta_angles сервера (cmd.angles + delta_angles, pmove.c
+ * PM_ClampAngles). Сервер пишет delta_angles при респауне и телепорте,
+ * клиентский cl.viewangles при этом не трогает (cl_input.c: IN_CenterView
+ * и CL_ClampPitch только читают их) — поэтому прибавка дельты к
+ * cl.viewangles с сервером не воюет.
+ *
+ * PITCH и ROLL — абсолютно относительно горизонта. Горизонт в шлеме
+ * обязан совпадать с реальным, а дельта накапливала бы ошибку на каждом
+ * упоре: CL_ClampPitch зажимает pitch ±89, и «лишний» наклон головы за
+ * пределом терялся бы, после чего горизонт навсегда уезжал. При
+ * абсолютной записи зажим срабатывает кадр за кадром и ничего не копит.
+ * Вычитание delta_angles нужно, чтобы видимый pitch (cmd + delta) равнялся
+ * pitch головы при любом значении, которое выставил сервер.
+ *
+ * ROLL проходит до рендера без отдельного канала: ANGLE2SHORT по всем
+ * трём углам (CL_FinishMove) -> PM_ClampAngles (цикл по трём, зажим только
+ * PITCH) -> cl.predicted_angles -> cl.refdef.viewangles (CL_CalcViewValues)
+ * -> матрица вида. Без предсказания (cl_predict 0) путь тот же:
+ * CL_PredictMovement копирует viewangles + delta_angles по всем трём.
+ */
+void VR_ApplyHeadToView( void )
+{
+	float head[3], d;
+	bool drive;
+
+	if ( !vr.inited )
+		return;
+
+	/* В меню, консоли, до входа в игру и без данных голова камерой не
+	   управляет: база дельты сбрасывается, чтобы повороты головы за это
+	   время не прилетели в камеру разом при возврате. */
+	drive = vr.mode_applied && vr.seeded && VR_Active()
+	     && cls.state == ca_active && cls.key_dest == key_game
+	     && !VR_LensCalibrating(); /* мишень обязана стоять в центре линз */
+
+	if ( !drive )
+	{
+		if ( vr.cam_driving && !vr.mode_applied )
+		{
+			/* VR выключили: roll головы остался бы в cl.viewangles
+			   навсегда — в обычной игре его больше никто не пишет. */
+			cl.viewangles[ROLL] = 0.0f;
+		}
+		if ( !vr.mode_applied )
+			vr.cam_driving = false;
+		vr.cam_valid = false;
+		return;
+	}
+
+	VR_GetHeadAngles( head );
+
+	if ( vr.cam_valid )
+	{
+		d = VR_NormalizeAngle( head[YAW] - vr.cam_prev_yaw );
+		if ( fabs( d ) < VR_YAW_JUMP_DEG )
+			cl.viewangles[YAW] += d;
+	}
+	vr.cam_prev_yaw = head[YAW];
+	vr.cam_valid = true;
+
+	cl.viewangles[PITCH] = head[PITCH] - VR_ServerDelta( PITCH );
+	cl.viewangles[ROLL] = head[ROLL] - VR_ServerDelta( ROLL );
+	vr.cam_driving = true;
 }
 
 void VR_DrawDebug( void )
@@ -743,7 +1029,7 @@ void VR_DrawDebug( void )
 	if ( !vr.inited || vr_debug->value == 0.0f )
 		return;
 
-	VRM_QuatToQ2Angles( vr.f.q, a );
+	VR_CameraAngles( a );
 
 	/* Масштаб меню: в сплит-скрине 2D жмётся вдвое по горизонтали, и
 	   обычный однопиксельный шрифт в шлеме нечитаем в принципе. */
@@ -751,8 +1037,9 @@ void VR_DrawDebug( void )
 	step = (int)( 8 * scale );
 	y = step;
 
-	DrawStringScaled( step, y, va( "VR rot=%d  %s", vr.rotation,
-			VR_Active() ? "STREAMING" : "no data" ), scale );
+	DrawStringScaled( step, y, va( "VR rot=%d  %s  mode %d%s", vr.rotation,
+			VR_Active() ? "STREAMING" : "no data", (int)vr.mode_applied,
+			vr.cam_driving ? " cam" : "" ), scale );
 	y += step;
 	DrawStringScaled( step, y, va( "pitch %+6.1f yaw %+6.1f roll %+6.1f",
 			a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2] ), scale );
@@ -805,7 +1092,10 @@ void VR_Init( void ) {}
 void VR_Shutdown( void ) {}
 void VR_Frame( void ) {}
 bool VR_Active( void ) { return false; }
+bool VR_ModeEnabled( void ) { return false; }
 void VR_GetHeadAngles( float angles[3] ) { angles[0] = angles[1] = angles[2] = 0.0f; }
+void VR_ApplyHeadToView( void ) {}
+int VR_LockTransform( int transform ) { return transform; }
 void VR_DrawDebug( void ) {}
 
 #endif /* AURORA_VR */
