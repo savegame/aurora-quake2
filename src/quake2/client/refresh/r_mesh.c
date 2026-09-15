@@ -439,7 +439,9 @@ void R_AliasModel_draw(entity_t *entity)
 		oglwPushMatrix();
 		oglwLoadIdentity();
 		oglwScale(-1, 1, 1);
-		R_View_setupProjection(r_newrefdef.fov_y, (float)r_newrefdef.width / r_newrefdef.height, 4, 4096);
+		/* Тот же aspect, что у основной проекции (в стерео — половина кадра),
+		   иначе зеркальная модель оружия разъедется со сценой. */
+		R_View_setupProjection(r_newrefdef.fov_y, R_View_getAspect(), 4, 4096);
 		oglwMatrixMode(GL_MODELVIEW);
 
 		glCullFace(GL_BACK);

@@ -2919,16 +2919,19 @@ static void R_Setup2DViewport()
 	int x = 0, y = 0;
 	int w = viddef.width, h = viddef.height;
 
+	/* Половины обязаны совпадать с раскладкой 3D-вьюпорта (R_View_setup3D):
+	   там eyeIndex 0 — правая половина (LR) и нижняя (TB). Раньше здесь было
+	   наоборот, и HUD каждого глаза рисовался поверх чужой сцены. */
 	if (stereo_split_lr)
 	{
 		w = w / 2;
-		x = eyeIndex == 0 ? 0 : w;
+		x = eyeIndex == 0 ? w : 0;
 	}
 
 	if (stereo_split_tb)
 	{
 		h = h / 2;
-		y = eyeIndex == 0 ? h : 0;
+		y = eyeIndex == 0 ? 0 : h;
 	}
 
 	oglwSetViewport(x, y, w, h);
@@ -2956,6 +2959,38 @@ static void R_Setup2D()
 //********************************************************************************
 // View.
 //********************************************************************************
+/* В сплит-режимах кадр делится пополам, и вьюпорт одного глаза вдвое уже
+   (LR) либо вдвое ниже (TB) полного кадра. Проекцию надо строить под размеры
+   ИМЕННО половины: раньше aspect брался от полного кадра, и картинка каждого
+   глаза сжималась по горизонтали ровно вдвое. Для half-SBS на 3D-телевизоре
+   то поведение было верным (телевизор растягивает половину обратно), для
+   картонного VR — нет: глаз физически видит область W/2 x H. */
+float R_View_getAspect(void)
+{
+	float w = (float)r_newrefdef.width;
+	float h = (float)r_newrefdef.height;
+	if (gl_state.camera_separation)
+	{
+		if (gl_state.stereo_mode == STEREO_SPLIT_HORIZONTAL)
+			w *= 0.5f;
+		else if (gl_state.stereo_mode == STEREO_SPLIT_VERTICAL)
+			h *= 0.5f;
+	}
+	if (h <= 0.0f)
+		return 1.0f;
+	return w / h;
+}
+
+/* Тот же расчёт, что CalcFov в cl_view.c, но локально в рендере: клиент
+   считает fov_y под полный кадр, а нам нужен fov_y половины. */
+static float R_View_calcFovY(float fovX, float aspect)
+{
+	float t = tanf(fovX * Q_PI / 360.0f);
+	if (aspect <= 0.0f)
+		return fovX;
+	return atanf(t / aspect) * 360.0f / Q_PI;
+}
+
 void R_View_setupProjection(GLfloat fovy, GLfloat aspect, GLfloat zNear, GLfloat zFar)
 {
 	GLfloat xmin, xmax, ymin, ymax;
@@ -3106,7 +3141,7 @@ static void R_View_setup3D()
 	oglwSetViewport(x, y2, w, h);
 
 	/* set up projection matrix */
-	float screenaspect = (float)r_newrefdef.width / r_newrefdef.height;
+	float screenaspect = R_View_getAspect();
 	oglwMatrixMode(GL_PROJECTION);
 	oglwLoadIdentity();
 	if (gl_farsee->value == 0)
@@ -3201,6 +3236,17 @@ void R_View_draw(refdef_t *fd)
 	}
 
 	r_newrefdef = *fd;
+
+	/* fov_y приходит из клиента посчитанным под ПОЛНЫЙ кадр (cl_view.c,
+	   CalcFov). В сплит-режимах вьюпорт — половина, поэтому fov_y пересчитываем
+	   под её aspect, сохраняя fov_x на глаз. Обязательно до R_View_setupFrustum:
+	   он строит плоскости отсечения по fov_x/fov_y и иначе разойдётся с
+	   проекцией из R_View_setup3D. */
+	if (gl_state.camera_separation &&
+		(gl_state.stereo_mode == STEREO_SPLIT_HORIZONTAL || gl_state.stereo_mode == STEREO_SPLIT_VERTICAL))
+	{
+		r_newrefdef.fov_y = R_View_calcFovY(r_newrefdef.fov_x, R_View_getAspect());
+	}
 
 	if (!r_worldmodel && !(r_newrefdef.rdflags & RDF_NOWORLDMODEL))
 	{
@@ -4392,8 +4438,19 @@ static void R_Register()
 	gl_stencilshadow = Cvar_Get("gl_stencilshadow", "1", CVAR_ARCHIVE);
 
 	gl_stereo = Cvar_Get("gl_stereo", "0", CVAR_ARCHIVE);
-	gl_stereo_separation = Cvar_Get("gl_stereo_separation", "-0.4", CVAR_ARCHIVE);
-	gl_stereo_convergence = Cvar_Get("gl_stereo_convergence", "1", CVAR_ARCHIVE);
+	/* Полное расстояние между глазами в юнитах Quake 2 (1 юнит ~ 1 дюйм).
+	   Реальное межзрачковое расстояние ~63 мм = 2.5 дюйма; прежние -0.4
+	   давали ~10 мм — в 6 раз меньше, глубины практически не было.
+	   Знак обязан оставаться отрицательным: раскладка вьюпортов завязана на
+	   eyeIndex, а не на знак, и при положительном значении глаза меняются
+	   местами (перекрёстная стереопара вместо параллельной). */
+	gl_stereo_separation = Cvar_Get("gl_stereo_separation", "-2.5", CVAR_ARCHIVE);
+	/* Сдвиг фрустума: 0 — параллельные камеры, нулевая параллакса на
+	   бесконечности. Это штатная схема для VR-шлема. Прежняя 1 подбиралась
+	   под separation -0.4 (сдвиг ~0.1 у ближней плоскости); с реальным IPD та
+	   же единица дала бы точку схождения в ~8 юнитах от глаза и сильное
+	   расхождение картинок. */
+	gl_stereo_convergence = Cvar_Get("gl_stereo_convergence", "0", CVAR_ARCHIVE);
 	gl_stereo_anaglyph_colors = Cvar_Get("gl_stereo_anaglyph_colors", "rc", CVAR_ARCHIVE);
 
 	Cmd_AddCommand("imagelist", R_ImageList_f);

@@ -208,6 +208,8 @@ extern int registration_sequence;
 void V_AddBlend(float r, float g, float b, float a, float *v_blend);
 
 void R_View_setupProjection(GLfloat fovy, GLfloat aspect, GLfloat zNear, GLfloat zFar);
+/* Соотношение сторон вьюпорта ОДНОГО глаза (в сплит-режимах — половина кадра). */
+float R_View_getAspect(void);
 
 void R_AliasModel_draw(entity_t *e);
 void R_BrushModel_draw(entity_t *e);
