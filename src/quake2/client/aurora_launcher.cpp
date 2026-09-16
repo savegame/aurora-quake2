@@ -406,6 +406,10 @@ struct LauncherSettings
 	/* Картонный VR: cvar vr_mode (стерео + голова управляет камерой). */
 	bool        vr_mode = false;
 #endif
+	/* Ключи, о которых лаунчер не знает (например калибровку линз vr_lens_*,
+	   которую пишет движок из любого мода). Переносятся при сохранении как
+	   есть: иначе SaveSettings перед каждым запуском стирал бы их. */
+	std::vector<std::string> extra;
 };
 
 LauncherSettings g_settings;
@@ -422,6 +426,7 @@ void LoadSettings()
 {
 	FILE *f = fopen( ConfigFile().c_str(), "rb" );
 	if( !f ) return;
+	g_settings.extra.clear();
 	char line[4096];
 	while( fgets( line, sizeof( line ), f ))
 	{
@@ -444,6 +449,7 @@ void LoadSettings()
 #if defined(AURORA_VR)
 		else if( k == "vr_mode" )        g_settings.vr_mode = atoi( v.c_str()) != 0;
 #endif
+		else                             g_settings.extra.push_back( k + "=" + v );
 	}
 	fclose( f );
 	if( g_settings.r_3d_scale < 0.25f ) g_settings.r_3d_scale = 0.25f;
@@ -475,6 +481,8 @@ void SaveSettings()
 #if defined(AURORA_VR)
 	fprintf( f, "vr_mode=%d\n",        g_settings.vr_mode ? 1 : 0 );
 #endif
+	for( const std::string &e : g_settings.extra )
+		fprintf( f, "%s\n", e.c_str());
 	fclose( f );
 }
 

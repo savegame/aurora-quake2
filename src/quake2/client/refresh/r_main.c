@@ -2994,6 +2994,19 @@ static float R_View_calcFovY(float fovX, float aspect)
 	return atanf(t / aspect) * 360.0f / Q_PI;
 }
 
+#if defined(AURORA_VR)
+/* Обратный расчёт: в VR вертикальный угол задан оптикой линзы, а
+   горизонтальный обязан следовать из него и пропорций вьюпорта — той же
+   парой (fov_y, aspect) строит проекцию R_View_setup3D. */
+static float R_View_calcFovX(float fovY, float aspect)
+{
+	float t = tanf(fovY * Q_PI / 360.0f);
+	if (aspect <= 0.0f)
+		return fovY;
+	return atanf(t * aspect) * 360.0f / Q_PI;
+}
+#endif
+
 void R_View_setupProjection(GLfloat fovy, GLfloat aspect, GLfloat zNear, GLfloat zFar)
 {
 	GLfloat xmin, xmax, ymin, ymax;
@@ -3245,6 +3258,22 @@ void R_View_draw(refdef_t *fd)
 	   под её aspect, сохраняя fov_x на глаз. Обязательно до R_View_setupFrustum:
 	   он строит плоскости отсечения по fov_x/fov_y и иначе разойдётся с
 	   проекцией из R_View_setup3D. */
+#if defined(AURORA_VR)
+	/* В шлеме угол обзора задаёт оптика, а не cvar fov: глаз видит край
+	   экрана под вполне определённым углом (размер экрана, расстояние до
+	   линзы, дисторсия — RFBO_GetLensFovY). Разойдись рендер с оптикой —
+	   мир растянут, и поворот головы не совпадает с движением картинки.
+	   fov_x выводим из fov_y и реального aspect вьюпорта: проекция строится
+	   именно этой парой (R_View_setup3D), и фрустум обязан ей соответствовать. */
+	float lensFovY;
+	if (gl_state.camera_separation && gl_state.stereo_mode == STEREO_SPLIT_HORIZONTAL &&
+		RFBO_GetLensFovY(&lensFovY))
+	{
+		r_newrefdef.fov_y = lensFovY;
+		r_newrefdef.fov_x = R_View_calcFovX(lensFovY, R_View_getAspect());
+	}
+	else
+#endif
 	if (gl_state.camera_separation &&
 		(gl_state.stereo_mode == STEREO_SPLIT_HORIZONTAL || gl_state.stereo_mode == STEREO_SPLIT_VERTICAL))
 	{

@@ -74,6 +74,11 @@ void VR_DrawDebug( void );
  * только при изменении. */
 
 /* Регистрация cvar'ов и команды. Вызов из VR_Init. */
+/* Подмешивает калибровку линз из общего launcher.conf. Вызывается из
+   Qcommon_Init сразу после exec user.cfg: значения ставятся в командный
+   буфер и перекрывают конфиг текущего мода, а +set из командной строки
+   выполняется позже и остаётся главнее. */
+void VR_LensLoadShared( void );
 void VR_LensInit( void );
 void VR_LensShutdown( void );
 

@@ -49,11 +49,15 @@ void RFBO_TransformTouch(float fx, float fy, int *x, int *y);
 
 /* Картонный VR (AURORA_VR): раскладка изображений глаз под линзы.
    split = false — вывод обычным полноэкранным квадом, как без VR.
-   split = true — левая и правая половины текстуры рисуются двумя квадами
-   с центрами на заданном расстоянии (мм экрана), см. client/vr_lens.h.
+   split = true — левая и правая половины текстуры рисуются сеткой
+   дисторсии (по одной на глаз) с центрами на заданном расстоянии
+   (мм экрана), см. client/vr_lens.h.
+   distMm — расстояние экран-линза, k1/k2 — коэффициенты Brown-Conrady
+   в тангенсах угла (профили Cardboard подставляются как есть).
    Вершины пересчитываются здесь и при смене поворота/размера/дисплея —
    не в кадре. Вызывать только при изменении параметров. */
-void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm);
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm,
+	float distMm, float k1, float k2);
 
 /* Окно переехало на другой дисплей: перечитать DPI и пересчитать раскладку. */
 void RFBO_RefreshDisplayMetrics(void);
@@ -61,5 +65,15 @@ void RFBO_RefreshDisplayMetrics(void);
 /* Физический размер контента, по которому посчитана раскладка (мм).
    Возвращает false, если DPI не получен и взят фолбэк. */
 bool RFBO_GetLensScreenMm(float *widthMm, float *heightMm);
+
+/* Вертикальный угол обзора (градусы), который глаз реально видит через
+   линзу после дисторсии. Посчитан по событию в RFBO_SetLensLayout, кадр
+   только читает. false — раскладки глаз нет, FOV считает движок как обычно. */
+bool RFBO_GetLensFovY(float *fovYdeg);
+
+/* Во сколько раз дисторсия растягивает центр картинки: столько экранных
+   пикселей приходится на тексель кадра в центре линзы при масштабе FBO 1.0.
+   Ориентир для r_3d_scale. Возвращает false, если раскладки глаз нет. */
+bool RFBO_GetLensCenterMagnification(float *mag);
 
 #endif

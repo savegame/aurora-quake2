@@ -32,6 +32,11 @@
    (a_position/a_color/a_texcoord0/a_texcoord1 — низкие индексы). */
 #define RFBO_ATTR_POS 14
 #define RFBO_ATTR_UV  15
+#if defined(AURORA_VR)
+/* Границы половины кадра своего глаза (u_lo, u_hi) — по вершине, постоянные
+   внутри глаза. Локация из того же «высокого» диапазона. */
+#define RFBO_ATTR_BOUNDS 13
+#endif
 
 static struct
 {
@@ -48,18 +53,28 @@ static struct
 	int rotation;         /* enum wl_output_transform */
 	bool ready;
 #if defined(AURORA_VR)
-	/* Раскладка глаз под линзы. Параметры задаёт клиент (vr_lens.c),
-	   вершины готовятся в RFBO_UpdateLensLayout по событиям; кадр берёт
-	   готовые drawVerts/drawCount. */
+	/* Раскладка глаз под линзы и сетка дисторсии. Параметры задаёт клиент
+	   (vr_lens.c), вершины готовятся в RFBO_UpdateLensLayout по событиям;
+	   кадр только рисует готовый VBO. */
 	bool lensSplit;
+	bool lensActive;      /* сетка построена и загружена — можно рисовать */
 	float lensSepMm, lensVofsMm, lensTiltMm;
+	float lensDistMm, lensK1, lensK2;
 	float lensWidthMm, lensHeightMm;
 	bool lensFromDpi;
-	float lensVerts[48];
-	const float *drawVerts;
-	int drawCount;
+	vrl_geom_t lensGeom;
+	GLuint lensProgram;
+	GLint lensURot, lensUTex, lensUGamma;
+	GLuint lensVbo, lensIbo;
 #endif
 } l_fbo;
+
+#if defined(AURORA_VR)
+/* Сетка дисторсии: ~115 КБ вершин и 55 КБ индексов. Статика, а не куча —
+   выделений памяти в кадре быть не должно, а размер фиксирован. */
+static float l_lensVerts[VRL_MESH_VERTS * VRL_MESH_FLOATS_PER_VERT];
+static unsigned short l_lensIndices[VRL_MESH_INDICES];
+#endif
 
 /* Полноэкранный квад в NDC: (-1,-1)..(1,1), pos2 + uv2.
    UV не поворачиваются никогда — поворот только геометрии. */
@@ -108,6 +123,43 @@ static const char l_fragmentShaderSrc[] =
 	"	gl_FragColor = vec4(pow(c.rgb, vec3(u_gamma)), c.a);\n"
 	"}\n";
 
+#if defined(AURORA_VR)
+/* Шейдер сетки дисторсии. Отличий от обычного вывода два: границы половины
+   кадра идут третьим атрибутом, и фрагмент вне своей половины гасится в
+   чёрное. UV по-прежнему проходят в шейдер как записаны в вершинах —
+   никаких пересчётов координат во фрагментном шейдере (правило
+   FBO-модуля), маска считается по уже готовому v_uv. */
+static const char l_lensVertexShaderSrc[] =
+	"attribute vec2 a_pos;\n"
+	"attribute vec2 a_uv;\n"
+	"attribute vec2 a_bounds;\n"
+	"uniform mat2 u_rot;\n"
+	"varying vec2 v_uv;\n"
+	"varying vec2 v_bounds;\n"
+	"void main()\n"
+	"{\n"
+	"	gl_Position = vec4(u_rot * a_pos, 0.0, 1.0);\n"
+	"	v_uv = a_uv;\n"
+	"	v_bounds = a_bounds;\n"
+	"}\n";
+
+static const char l_lensFragmentShaderSrc[] =
+	"precision mediump float;\n"
+	"varying vec2 v_uv;\n"
+	"varying vec2 v_bounds;\n"
+	"uniform sampler2D u_tex;\n"
+	"uniform float u_gamma;\n"
+	"void main()\n"
+	"{\n"
+	"	vec4 c = texture2D(u_tex, v_uv);\n"
+	/* Вне половины кадра своего глаза — чёрное: соседний глаз не подглядывает,
+	   а край не размазывается клэмпом текстуры. */
+	"	float inside = step(v_bounds.x, v_uv.x) * step(v_uv.x, v_bounds.y)\n"
+	"		* step(0.0, v_uv.y) * step(v_uv.y, 1.0);\n"
+	"	gl_FragColor = vec4(pow(c.rgb, vec3(u_gamma)) * inside, 1.0);\n"
+	"}\n";
+#endif
+
 static GLuint RFBO_CompileShader(GLenum type, const char *src)
 {
 	GLuint shader = glCreateShader(type);
@@ -155,6 +207,75 @@ static GLuint RFBO_CreateProgram(void)
 	}
 	return program;
 }
+
+#if defined(AURORA_VR)
+/* Программа сетки — отдельная от обычного вывода: без vr_mode блит обязан
+   остаться ровно прежним. Создаётся лениво, при первом включении раскладки
+   глаз (событие, не кадр): в сборке с AURORA_VR, но без шлема за неё не
+   платим. */
+static bool RFBO_CreateLensProgram(void)
+{
+	if (l_fbo.lensProgram != 0)
+		return true;
+
+	GLuint vs = RFBO_CompileShader(GL_VERTEX_SHADER, l_lensVertexShaderSrc);
+	GLuint fs = RFBO_CompileShader(GL_FRAGMENT_SHADER, l_lensFragmentShaderSrc);
+	if (vs == 0 || fs == 0)
+		return false;
+
+	GLuint program = glCreateProgram();
+	glAttachShader(program, vs);
+	glAttachShader(program, fs);
+	glBindAttribLocation(program, RFBO_ATTR_POS, "a_pos");
+	glBindAttribLocation(program, RFBO_ATTR_UV, "a_uv");
+	glBindAttribLocation(program, RFBO_ATTR_BOUNDS, "a_bounds");
+	glLinkProgram(program);
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	GLint linked = 0;
+	glGetProgramiv(program, GL_LINK_STATUS, &linked);
+	if (!linked)
+	{
+		char log[1024];
+		glGetProgramInfoLog(program, sizeof(log), NULL, log);
+		R_printf(PRINT_ALL, "RFBO: lens program link error: %s\n", log);
+		glDeleteProgram(program);
+		return false;
+	}
+
+	l_fbo.lensProgram = program;
+	l_fbo.lensURot = glGetUniformLocation(program, "u_rot");
+	l_fbo.lensUTex = glGetUniformLocation(program, "u_tex");
+	l_fbo.lensUGamma = glGetUniformLocation(program, "u_gamma");
+
+	/* Индексы от параметров не зависят — грузятся один раз. */
+	glGenBuffers(1, &l_fbo.lensVbo);
+	glGenBuffers(1, &l_fbo.lensIbo);
+	VRL_BuildMeshIndices(l_lensIndices);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, l_fbo.lensIbo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(l_lensIndices), l_lensIndices, GL_STATIC_DRAW);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+	R_printf(PRINT_ALL, "RFBO: lens distortion mesh %ix%i per eye (%i verts)\n",
+		VRL_MESH_CELLS, VRL_MESH_CELLS, VRL_MESH_VERTS);
+	return true;
+}
+
+static void RFBO_DestroyLensProgram(void)
+{
+	if (l_fbo.lensVbo != 0)
+		glDeleteBuffers(1, &l_fbo.lensVbo);
+	if (l_fbo.lensIbo != 0)
+		glDeleteBuffers(1, &l_fbo.lensIbo);
+	if (l_fbo.lensProgram != 0)
+		glDeleteProgram(l_fbo.lensProgram);
+	l_fbo.lensVbo = 0;
+	l_fbo.lensIbo = 0;
+	l_fbo.lensProgram = 0;
+	l_fbo.lensActive = false;
+}
+#endif
 
 static bool RFBO_CreateTargets(int w, int h)
 {
@@ -241,9 +362,8 @@ static void RFBO_ComputeSize(int windowWidth, int windowHeight, int *fboW, int *
  */
 static void RFBO_UpdateLensLayout(void)
 {
-	l_fbo.drawVerts = l_quadVerts;
-	l_fbo.drawCount = 6;
-	if (!l_fbo.lensSplit || l_fbo.screenW <= 0 || l_fbo.screenH <= 0)
+	l_fbo.lensActive = false;
+	if (!l_fbo.lensSplit || !l_fbo.ready || l_fbo.screenW <= 0 || l_fbo.screenH <= 0)
 		return;
 
 	bool swapped = (l_fbo.rotation & 1) != 0;
@@ -277,11 +397,36 @@ static void RFBO_UpdateLensLayout(void)
 	}
 	l_fbo.lensFromDpi = fromDpi;
 
-	float c[4];
-	VRL_EyeCenters(l_fbo.lensWidthMm, l_fbo.lensHeightMm,
-		l_fbo.lensSepMm, l_fbo.lensVofsMm, l_fbo.lensTiltMm, c);
-	l_fbo.drawCount = VRL_BuildEyeQuads(c, l_fbo.lensVerts);
-	l_fbo.drawVerts = l_fbo.lensVerts;
+	if (!RFBO_CreateLensProgram())
+		return; /* без программы вывод останется обычным квадом */
+
+	vrl_params_t p;
+	p.widthMm = l_fbo.lensWidthMm;
+	p.heightMm = l_fbo.lensHeightMm;
+	p.sepMm = l_fbo.lensSepMm;
+	p.vofsMm = l_fbo.lensVofsMm;
+	p.tiltMm = l_fbo.lensTiltMm;
+	p.distMm = l_fbo.lensDistMm;
+	p.k1 = l_fbo.lensK1;
+	p.k2 = l_fbo.lensK2;
+
+	VRL_ComputeGeom(&p, &l_fbo.lensGeom);
+	VRL_BuildEyeMesh(&p, &l_fbo.lensGeom, l_lensVerts);
+
+	glBindBuffer(GL_ARRAY_BUFFER, l_fbo.lensVbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(l_lensVerts), l_lensVerts, GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	l_fbo.lensActive = true;
+
+	/* Редкое событие (смена параметров калибровки в шлеме — раз в несколько
+	   кадров при удержании кнопки, обычно вообще один раз за запуск).
+	   Увеличение в центре — ориентир для масштаба FBO: столько экранных
+	   пикселей приходится на тексель кадра в центре линзы. */
+	R_printf(PRINT_ALL, "RFBO: lens k1 %.3f k2 %.3f dist %.1f mm -> fov %.1fx%.1f deg, "
+		"center magnification %.2f (fbo scale %.2f for 1:1 in center, now %.2f)\n",
+		l_fbo.lensK1, l_fbo.lensK2, l_fbo.lensDistMm,
+		l_fbo.lensGeom.fovXdeg, l_fbo.lensGeom.fovYdeg,
+		l_fbo.lensGeom.centerMag, l_fbo.lensGeom.centerMag, l_fbo.scale);
 }
 #endif
 
@@ -295,6 +440,7 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 	   рендера (vid_restart) не должно их терять. */
 	bool lensSplit = l_fbo.lensSplit;
 	float lensSep = l_fbo.lensSepMm, lensVofs = l_fbo.lensVofsMm, lensTilt = l_fbo.lensTiltMm;
+	float lensDist = l_fbo.lensDistMm, lensK1 = l_fbo.lensK1, lensK2 = l_fbo.lensK2;
 #endif
 	memset(&l_fbo, 0, sizeof(l_fbo));
 #if defined(AURORA_VR)
@@ -302,8 +448,9 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 	l_fbo.lensSepMm = lensSep;
 	l_fbo.lensVofsMm = lensVofs;
 	l_fbo.lensTiltMm = lensTilt;
-	l_fbo.drawVerts = l_quadVerts;
-	l_fbo.drawCount = 6;
+	l_fbo.lensDistMm = lensDist;
+	l_fbo.lensK1 = lensK1;
+	l_fbo.lensK2 = lensK2;
 #endif
 	l_fbo.scale = 1.0f;
 #if defined(AURORA_OS)
@@ -374,6 +521,9 @@ bool RFBO_Init(int windowWidth, int windowHeight)
 void RFBO_Shutdown(void)
 {
 	RFBO_DestroyTargets();
+#if defined(AURORA_VR)
+	RFBO_DestroyLensProgram();
+#endif
 	if (l_fbo.program != 0)
 		glDeleteProgram(l_fbo.program);
 	l_fbo.program = 0;
@@ -443,14 +593,52 @@ void RFBO_DrawToScreen(void)
 	glDisable(GL_BLEND);
 	glDisable(GL_DEPTH_TEST);
 #if defined(AURORA_VR)
-	/* Квады глаз покрывают экран не целиком (сдвиг под линзы) — остальное
-	   должно быть чёрным, а не прошлым кадром. Флаг готов заранее
-	   (RFBO_UpdateLensLayout); цвет очистки движок выставляет сам перед
-	   каждой своей очисткой (R_Frame_clear), кэша у wrapper'а для него нет. */
-	if (l_fbo.drawVerts != l_quadVerts)
+	/* Сетки глаз покрывают экран не целиком (сдвиг под линзы и чёрное за
+	   краем поля) — остальное должно быть чёрным, а не прошлым кадром.
+	   Флаг готов заранее (RFBO_UpdateLensLayout); цвет очистки движок
+	   выставляет сам перед каждой своей очисткой (R_Frame_clear), кэша у
+	   wrapper'а для него нет.
+
+	   Единственное условие в кадре — выбор пути вывода по готовому флагу:
+	   обе ветки прямые, без вычислений и выделений памяти. */
+	if (l_fbo.lensActive)
 	{
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
+
+		glUseProgram(l_fbo.lensProgram);
+		glUniformMatrix2fv(l_fbo.lensURot, 1, GL_FALSE, l_rotMatrices[l_fbo.rotation & 3]);
+		glUniform1i(l_fbo.lensUTex, 0);
+		float lensGamma = r_gamma->value;
+		if (lensGamma <= 0.0f)
+			lensGamma = 1.0f;
+		glUniform1f(l_fbo.lensUGamma, 1.0f / lensGamma);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, l_fbo.colorTex);
+
+		glBindBuffer(GL_ARRAY_BUFFER, l_fbo.lensVbo);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, l_fbo.lensIbo);
+		glEnableVertexAttribArray(RFBO_ATTR_POS);
+		glEnableVertexAttribArray(RFBO_ATTR_UV);
+		glEnableVertexAttribArray(RFBO_ATTR_BOUNDS);
+		const GLsizei stride = VRL_MESH_FLOATS_PER_VERT * sizeof(float);
+		glVertexAttribPointer(RFBO_ATTR_POS, 2, GL_FLOAT, GL_FALSE, stride, (const void *)0);
+		glVertexAttribPointer(RFBO_ATTR_UV, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(2 * sizeof(float)));
+		glVertexAttribPointer(RFBO_ATTR_BOUNDS, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(4 * sizeof(float)));
+		glDrawElements(GL_TRIANGLES, VRL_MESH_INDICES, GL_UNSIGNED_SHORT, (const void *)0);
+		glDisableVertexAttribArray(RFBO_ATTR_POS);
+		glDisableVertexAttribArray(RFBO_ATTR_UV);
+		glDisableVertexAttribArray(RFBO_ATTR_BOUNDS);
+		/* Буферы обратно в 0: wrapper рисует клиентскими массивами и про
+		   VBO не знает — оставленный бинд увёл бы его вершины в никуда. */
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+		oglwSetCurrentTextureUnitForced(0);
+		oglwBindTextureForced(0, 0);
+		glUseProgram(oglwGetProgram());
+		glEnable(GL_BLEND);
+		return;
 	}
 #endif
 
@@ -467,17 +655,9 @@ void RFBO_DrawToScreen(void)
 
 	glEnableVertexAttribArray(RFBO_ATTR_POS);
 	glEnableVertexAttribArray(RFBO_ATTR_UV);
-#if defined(AURORA_VR)
-	/* Позиции квадов глаз — в осях контента, до u_rot: поворот экрана
-	   калибровку не ломает. Дисторсия (этап 5) ляжет в UV этих же квадов. */
-	glVertexAttribPointer(RFBO_ATTR_POS, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_fbo.drawVerts);
-	glVertexAttribPointer(RFBO_ATTR_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_fbo.drawVerts + 2);
-	glDrawArrays(GL_TRIANGLES, 0, l_fbo.drawCount);
-#else
 	glVertexAttribPointer(RFBO_ATTR_POS, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_quadVerts);
 	glVertexAttribPointer(RFBO_ATTR_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), l_quadVerts + 2);
 	glDrawArrays(GL_TRIANGLES, 0, 6);
-#endif
 	glDisableVertexAttribArray(RFBO_ATTR_POS);
 	glDisableVertexAttribArray(RFBO_ATTR_UV);
 
@@ -574,13 +754,33 @@ void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
 }
 
 #if defined(AURORA_VR)
-void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm)
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm,
+	float distMm, float k1, float k2)
 {
 	l_fbo.lensSplit = split;
 	l_fbo.lensSepMm = sepMm;
 	l_fbo.lensVofsMm = vofsMm;
 	l_fbo.lensTiltMm = tiltMm;
+	l_fbo.lensDistMm = distMm;
+	l_fbo.lensK1 = k1;
+	l_fbo.lensK2 = k2;
 	RFBO_UpdateLensLayout();
+}
+
+bool RFBO_GetLensFovY(float *fovYdeg)
+{
+	if (!l_fbo.lensActive)
+		return false;
+	*fovYdeg = l_fbo.lensGeom.fovYdeg;
+	return true;
+}
+
+bool RFBO_GetLensCenterMagnification(float *mag)
+{
+	if (!l_fbo.lensActive)
+		return false;
+	*mag = l_fbo.lensGeom.centerMag;
+	return true;
 }
 
 void RFBO_RefreshDisplayMetrics(void)
@@ -617,9 +817,21 @@ void RFBO_TransformTouch(float fx, float fy, int *x, int *y)
 
 #if !(defined(AURORA_FBO) && defined(AURORA_VR))
 /* Без FBO или без VR раскладки глаз нет: вывод (если он есть) — один квад. */
-void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm)
+void RFBO_SetLensLayout(bool split, float sepMm, float vofsMm, float tiltMm,
+	float distMm, float k1, float k2)
 {
 	(void)split; (void)sepMm; (void)vofsMm; (void)tiltMm;
+	(void)distMm; (void)k1; (void)k2;
+}
+bool RFBO_GetLensFovY(float *fovYdeg)
+{
+	*fovYdeg = 0.0f;
+	return false;
+}
+bool RFBO_GetLensCenterMagnification(float *mag)
+{
+	*mag = 1.0f;
+	return false;
 }
 void RFBO_RefreshDisplayMetrics(void) {}
 bool RFBO_GetLensScreenMm(float *widthMm, float *heightMm)

@@ -39,6 +39,10 @@
 static cvar_t *vr_lens_sep_mm;
 static cvar_t *vr_lens_vofs_mm;
 static cvar_t *vr_lens_tilt_mm;
+static cvar_t *vr_lens_k1;
+static cvar_t *vr_lens_k2;
+static cvar_t *vr_lens_dist_mm;
+static cvar_t *vr_lens_distort;
 static cvar_t *vl_gl_stereo;
 static cvar_t *vl_vr_mode;
 
@@ -47,22 +51,63 @@ typedef enum
 	VRL_AXIS_NONE,
 	VRL_AXIS_SEP,
 	VRL_AXIS_VOFS,
-	VRL_AXIS_TILT
+	VRL_AXIS_TILT,
+	VRL_AXIS_K1,
+	VRL_AXIS_K2,
+	VRL_AXIS_DIST
 } vrl_axis_t;
+
+/* Страницы калибровки: положение картинок и оптика. Переключаются Y —
+   внутри экрана он свободен (короткий Y это vr_recenter, но во время
+   калибровки все нажатия съедает VR_LensKeyEvent, а длинное удержание
+   работает только при !vl.active). */
+typedef enum
+{
+	VRL_PAGE_POSITION,
+	VRL_PAGE_OPTICS,
+	VRL_PAGE_COUNT
+} vrl_page_t;
+
+/*
+ * Описание оси: cvar, пределы, шаг по времени удержания и точность записи.
+ * Таблицей, а не switch'ом: осей стало шесть, и у них разные масштабы —
+ * миллиметры крутятся десятыми, коэффициенты дисторсии тысячными.
+ */
+typedef struct
+{
+	cvar_t **cv;
+	float lo, hi;
+	float step0, step1, step2;
+	int   prec;
+} vrl_axis_info_t;
+
+static const vrl_axis_info_t l_axes[] =
+{
+	{ NULL, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1 },
+	{ &vr_lens_sep_mm,   VRL_SEP_MIN_MM,    VRL_SEP_MAX_MM,     0.2f,  0.5f,  1.0f, 1 },
+	{ &vr_lens_vofs_mm, -VRL_VOFS_MAX_MM,   VRL_VOFS_MAX_MM,    0.2f,  0.5f,  1.0f, 1 },
+	{ &vr_lens_tilt_mm, -VRL_TILT_MAX_MM,   VRL_TILT_MAX_MM,    0.2f,  0.5f,  1.0f, 1 },
+	{ &vr_lens_k1,       VRL_K_MIN,         VRL_K_MAX,          0.005f, 0.01f, 0.02f, 3 },
+	{ &vr_lens_k2,       VRL_K_MIN,         VRL_K_MAX,          0.005f, 0.01f, 0.02f, 3 },
+	{ &vr_lens_dist_mm,  VRL_DIST_MIN_MM,   VRL_DIST_MAX_MM,    0.5f,  1.0f,  2.0f, 1 },
+};
 
 static struct
 {
 	bool       inited;
 
 	/* Что уже отдано в RFBO_SetLensLayout: сравнение значений, а не флаги
-	   modified — их сбрасывают посторонние (как и в VR_Frame). */
+	   modified — их сбрасывают посторонние (как и в VR_Frame). Значения
+	   ЭФФЕКТИВНЫЕ: при vr_lens_distort 0 в k1/k2 лежат нули, поэтому
+	   выключение коррекции доезжает до FBO само собой. */
 	bool       layout_valid;
 	bool       layout_split;
-	float      layout[3];
+	float      layout[6];
 
 	bool       active;
+	vrl_page_t page;
 	bool       pending;      /* команда пришла до применения vr_mode */
-	float      saved[3];     /* значения до входа — для отмены */
+	float      saved[6];     /* значения до входа — для отмены */
 	bool       paused_by_us;
 
 	bool       y_held;
@@ -78,59 +123,48 @@ static struct
 
 /* --- значения ---------------------------------------------------------- */
 
-static cvar_t *VR_LensAxisCvar( vrl_axis_t axis, float *lo, float *hi )
+/* Шаг растёт с удержанием: мелкий для точной подгонки (0.2 мм — около
+   трёх пикселей на 400 dpi; 0.005 по k1 — предел различимого глазом на
+   краю поля), крупный — чтобы доехать с 75 до 60 мм не за минуту. */
+static void VR_LensNudge( vrl_axis_t axis, float sign, int held_ms )
 {
-	switch ( axis )
-	{
-	case VRL_AXIS_SEP:
-		*lo = VRL_SEP_MIN_MM;
-		*hi = VRL_SEP_MAX_MM;
-		return vr_lens_sep_mm;
-	case VRL_AXIS_VOFS:
-		*lo = -VRL_VOFS_MAX_MM;
-		*hi = VRL_VOFS_MAX_MM;
-		return vr_lens_vofs_mm;
-	case VRL_AXIS_TILT:
-		*lo = -VRL_TILT_MAX_MM;
-		*hi = VRL_TILT_MAX_MM;
-		return vr_lens_tilt_mm;
-	default:
-		return NULL;
-	}
-}
+	const vrl_axis_info_t *a;
+	cvar_t *cv;
+	float step, q, v;
 
-static void VR_LensNudge( vrl_axis_t axis, float delta )
-{
-	float lo, hi, v;
-	cvar_t *cv = VR_LensAxisCvar( axis, &lo, &hi );
-
+	if ( axis <= VRL_AXIS_NONE || (size_t)axis >= sizeof( l_axes ) / sizeof( l_axes[0] ) )
+		return;
+	a = &l_axes[axis];
+	cv = *a->cv;
 	if ( cv == NULL )
 		return;
 
-	/* Округление до 0.1 мм: иначе после сотни шагов в user.cfg окажется
-	   62.999996, а пользователь видит в подсказке 63.0. */
-	v = VRL_Clamp( cv->value + delta, lo, hi );
-	v = floorf( v * 10.0f + 0.5f ) / 10.0f;
-	Cvar_Set( cv->name, va( "%.1f", v ) );
+	step = ( held_ms < 1500 ) ? a->step0 : ( held_ms < 3000 ? a->step1 : a->step2 );
+
+	/* Округление до шага записи: иначе после сотни нажатий в user.cfg
+	   окажется 62.999996, а пользователь видит в подсказке 63.0. */
+	q = ( a->prec == 3 ) ? 1000.0f : 10.0f;
+	v = VRL_Clamp( cv->value + sign * step, a->lo, a->hi );
+	v = floorf( v * q + 0.5f ) / q;
+	Cvar_Set( cv->name, va( a->prec == 3 ? "%.3f" : "%.1f", v ) );
 }
 
-/* Шаг растёт с удержанием: мелкий для точной подгонки (0.2 мм — около
-   трёх пикселей на 400 dpi), крупный — чтобы доехать с 75 до 60 мм не за
-   минуту. */
-static float VR_LensStep( int held_ms )
-{
-	if ( held_ms < 1500 )
-		return 0.2f;
-	if ( held_ms < 3000 )
-		return 0.5f;
-	return 1.0f;
-}
-
+/* Сброс — только текущей страницы: угробить подобранное положение картинок,
+   промахнувшись мимо кнопки на странице оптики, было бы обидно. */
 static void VR_LensReset( void )
 {
-	Cvar_Set( "vr_lens_sep_mm", va( "%.1f", VRL_SEP_DEFAULT_MM ) );
-	Cvar_Set( "vr_lens_vofs_mm", "0" );
-	Cvar_Set( "vr_lens_tilt_mm", "0" );
+	if ( vl.page == VRL_PAGE_OPTICS )
+	{
+		Cvar_Set( "vr_lens_k1", va( "%.3f", VRL_K1_DEFAULT ) );
+		Cvar_Set( "vr_lens_k2", va( "%.3f", VRL_K2_DEFAULT ) );
+		Cvar_Set( "vr_lens_dist_mm", va( "%.1f", VRL_DIST_DEFAULT_MM ) );
+	}
+	else
+	{
+		Cvar_Set( "vr_lens_sep_mm", va( "%.1f", VRL_SEP_DEFAULT_MM ) );
+		Cvar_Set( "vr_lens_vofs_mm", "0" );
+		Cvar_Set( "vr_lens_tilt_mm", "0" );
+	}
 }
 
 /* --- вход и выход ------------------------------------------------------ */
@@ -142,9 +176,13 @@ static void VR_LensEnter( void )
 
 	vl.pending = false;
 	vl.active = true;
+	vl.page = VRL_PAGE_POSITION;
 	vl.saved[0] = vr_lens_sep_mm->value;
 	vl.saved[1] = vr_lens_vofs_mm->value;
 	vl.saved[2] = vr_lens_tilt_mm->value;
+	vl.saved[3] = vr_lens_k1->value;
+	vl.saved[4] = vr_lens_k2->value;
+	vl.saved[5] = vr_lens_dist_mm->value;
 	vl.held_axis = VRL_AXIS_NONE;
 	vl.y_used = true;
 
@@ -158,9 +196,12 @@ static void VR_LensEnter( void )
 		vl.paused_by_us = ( Cvar_VariableValue( "paused" ) != 0.0f );
 	}
 
-	Com_Printf( "vr_lens: calibration started (sep %.1f mm, vofs %.1f mm, tilt %.1f mm)\n",
-			vl.saved[0], vl.saved[1], vl.saved[2] );
+	Com_Printf( "vr_lens: calibration started (sep %.1f mm, vofs %.1f mm, tilt %.1f mm, "
+			"k1 %.3f, k2 %.3f, lens dist %.1f mm)\n",
+			vl.saved[0], vl.saved[1], vl.saved[2], vl.saved[3], vl.saved[4], vl.saved[5] );
 }
+
+static void VR_LensSaveShared( void );
 
 static void VR_LensLeave( bool save )
 {
@@ -177,6 +218,9 @@ static void VR_LensLeave( bool save )
 		Cvar_Set( "vr_lens_sep_mm", va( "%.1f", vl.saved[0] ) );
 		Cvar_Set( "vr_lens_vofs_mm", va( "%.1f", vl.saved[1] ) );
 		Cvar_Set( "vr_lens_tilt_mm", va( "%.1f", vl.saved[2] ) );
+		Cvar_Set( "vr_lens_k1", va( "%.3f", vl.saved[3] ) );
+		Cvar_Set( "vr_lens_k2", va( "%.3f", vl.saved[4] ) );
+		Cvar_Set( "vr_lens_dist_mm", va( "%.1f", vl.saved[5] ) );
 	}
 
 	if ( vl.paused_by_us )
@@ -188,8 +232,11 @@ static void VR_LensLeave( bool save )
 		/* Сразу на диск: приложение на телефоне чаще убивают, чем закрывают
 		   через quit, а калибровка в шлеме — не то, что хочется повторять. */
 		CL_WriteConfiguration();
-		Com_Printf( "vr_lens: saved sep %.1f mm, vofs %.1f mm, tilt %.1f mm\n",
-				vr_lens_sep_mm->value, vr_lens_vofs_mm->value, vr_lens_tilt_mm->value );
+		VR_LensSaveShared();
+		Com_Printf( "vr_lens: saved sep %.1f mm, vofs %.1f mm, tilt %.1f mm, "
+				"k1 %.3f, k2 %.3f, lens dist %.1f mm\n",
+				vr_lens_sep_mm->value, vr_lens_vofs_mm->value, vr_lens_tilt_mm->value,
+				vr_lens_k1->value, vr_lens_k2->value, vr_lens_dist_mm->value );
 	}
 	else
 	{
@@ -206,7 +253,10 @@ static void VR_LensCalibrate_f( void )
 		if ( vl.active )
 			VR_LensLeave( true );
 		else
+		{
 			CL_WriteConfiguration();
+			VR_LensSaveShared();
+		}
 	}
 	else if ( !Q_stricmp( arg, "cancel" ) )
 	{
@@ -238,6 +288,163 @@ static void VR_LensCalibrate_f( void )
 	}
 }
 
+/* --- общее хранилище калибровки ---------------------------------------- */
+
+/*
+ * Калибровка — свойство очков и телефона, а не мода. Архивные cvar'ы же
+ * движок пишет в user.cfg каталога ТЕКУЩЕГО мода (CL_WriteConfiguration ->
+ * FS_WritableGamedir), поэтому откалиброванное в baseq2 не видно в
+ * xatrix/rogue/ctf, и наоборот. Источник истины — launcher.conf
+ * (~/.config/<org>/<app>, разрешён песочницей): лаунчер хранит там свои
+ * настройки и не трогает чужие ключи, движок подмешивает значения после
+ * exec user.cfg и пишет их обратно при сохранении калибровки из любого мода.
+ * Работает и без лаунчера (AURORA_LAUNCHER_SKIP): файл читается напрямую.
+ */
+static const char *vrl_shared_keys[] =
+{
+	"vr_lens_sep_mm",
+	"vr_lens_vofs_mm",
+	"vr_lens_tilt_mm",
+	"vr_lens_k1",
+	"vr_lens_k2",
+	"vr_lens_dist_mm",
+	"vr_lens_distort",
+	NULL
+};
+
+static bool VR_LensSharedPath( char *out, size_t size )
+{
+	const char *home = getenv( "HOME" );
+	int n;
+
+	if ( home == NULL || home[0] == '\0' )
+		return false;
+	n = snprintf( out, size, "%s/.config/" AURORA_ORG "/" AURORA_APP "/launcher.conf", home );
+	return n > 0 && (size_t)n < size;
+}
+
+/* Индекс ключа калибровки в строке "key=value" или -1. */
+static int VR_LensSharedKey( const char *line )
+{
+	const char *eq;
+	size_t len;
+	int i;
+
+	while ( *line == ' ' || *line == '\t' )
+		line++;
+	eq = strchr( line, '=' );
+	if ( eq == NULL )
+		return -1;
+	len = (size_t)( eq - line );
+	while ( len > 0 && ( line[len - 1] == ' ' || line[len - 1] == '\t' ) )
+		len--;
+	for ( i = 0; vrl_shared_keys[i] != NULL; i++ )
+	{
+		if ( strlen( vrl_shared_keys[i] ) == len && !strncmp( line, vrl_shared_keys[i], len ) )
+			return i;
+	}
+	return -1;
+}
+
+void VR_LensLoadShared( void )
+{
+	char path[MAX_OSPATH];
+	char line[4096];
+	FILE *f;
+	int applied = 0;
+
+	if ( !VR_LensSharedPath( path, sizeof( path ) ) )
+		return;
+	f = fopen( path, "rb" );
+	if ( f == NULL )
+		return;
+
+	while ( fgets( line, sizeof( line ), f ) )
+	{
+		int k = VR_LensSharedKey( line );
+		char *eq, *end;
+		double v;
+
+		if ( k < 0 )
+			continue;
+		eq = strchr( line, '=' );
+		v = strtod( eq + 1, &end );
+		while ( *end == ' ' || *end == '\t' || *end == '\r' || *end == '\n' )
+			end++;
+		if ( end == eq + 1 || *end != '\0' || !isfinite( v ) )
+			continue;
+		/* В командный буфер идёт только число, перепечатанное здесь, а не
+		   строка из файла как есть. */
+		Cbuf_AddText( va( "set %s %g\n", vrl_shared_keys[k], v ) );
+		applied++;
+	}
+	fclose( f );
+
+	if ( applied > 0 )
+		Com_Printf( "vr_lens: %d calibration value(s) from %s\n", applied, path );
+}
+
+static void VR_LensSaveShared( void )
+{
+	char path[MAX_OSPATH];
+	char tmp[MAX_OSPATH];
+	char line[4096];
+	FILE *in, *out;
+	bool ok;
+	int i;
+
+	if ( !VR_LensSharedPath( path, sizeof( path ) ) )
+		return;
+	i = snprintf( tmp, sizeof( tmp ), "%s.tmp", path );
+	if ( i <= 0 || (size_t)i >= sizeof( tmp ) )
+		return;
+
+	FS_CreatePath( path );
+	out = fopen( tmp, "wb" );
+	if ( out == NULL )
+	{
+		Com_Printf( "vr_lens: couldn't write %s\n", tmp );
+		return;
+	}
+
+	/* Остальные ключи лаунчера переносятся как есть, прежние значения
+	   калибровки выбрасываются и дописываются заново в конце. */
+	in = fopen( path, "rb" );
+	if ( in != NULL )
+	{
+		while ( fgets( line, sizeof( line ), in ) )
+		{
+			size_t len;
+
+			if ( VR_LensSharedKey( line ) >= 0 )
+				continue;
+			len = strlen( line );
+			fputs( line, out );
+			if ( len > 0 && line[len - 1] != '\n' )
+				fputc( '\n', out );
+		}
+		fclose( in );
+	}
+
+	for ( i = 0; vrl_shared_keys[i] != NULL; i++ )
+		fprintf( out, "%s=%s\n", vrl_shared_keys[i], Cvar_VariableString( vrl_shared_keys[i] ) );
+
+	ok = !ferror( out );
+	if ( fclose( out ) != 0 )
+		ok = false;
+
+	/* Через временный файл и rename: приложение на телефоне могут убить в
+	   любой момент, а обрезанный launcher.conf потерял бы и настройки
+	   лаунчера. */
+	if ( !ok || rename( tmp, path ) != 0 )
+	{
+		remove( tmp );
+		Com_Printf( "vr_lens: couldn't update %s\n", path );
+		return;
+	}
+	Com_Printf( "vr_lens: calibration shared via %s\n", path );
+}
+
 /* --- публичный API ----------------------------------------------------- */
 
 void VR_LensInit( void )
@@ -247,6 +454,17 @@ void VR_LensInit( void )
 	vr_lens_sep_mm = Cvar_Get( "vr_lens_sep_mm", va( "%.0f", VRL_SEP_DEFAULT_MM ), CVAR_ARCHIVE );
 	vr_lens_vofs_mm = Cvar_Get( "vr_lens_vofs_mm", "0", CVAR_ARCHIVE );
 	vr_lens_tilt_mm = Cvar_Get( "vr_lens_tilt_mm", "0", CVAR_ARCHIVE );
+
+	/* Дисторсия. Дефолт — профиль Google Cardboard v2 (k1 0.34, k2 0.55 при
+	   39 мм от экрана до линзы): картонки повторяют этот чертёж, и с ним
+	   линии по краям заметно прямее, чем без коррекции. Нормировка — в
+	   тангенсах угла, поэтому коэффициенты из чужих профилей Cardboard
+	   подставляются сюда как есть. vr_lens_distort 0 выключает коррекцию,
+	   не теряя подобранных значений. */
+	vr_lens_k1 = Cvar_Get( "vr_lens_k1", va( "%.2f", VRL_K1_DEFAULT ), CVAR_ARCHIVE );
+	vr_lens_k2 = Cvar_Get( "vr_lens_k2", va( "%.2f", VRL_K2_DEFAULT ), CVAR_ARCHIVE );
+	vr_lens_dist_mm = Cvar_Get( "vr_lens_dist_mm", va( "%.0f", VRL_DIST_DEFAULT_MM ), CVAR_ARCHIVE );
+	vr_lens_distort = Cvar_Get( "vr_lens_distort", "1", CVAR_ARCHIVE );
 	/* Рендер регистрирует gl_stereo раньше (R_initialize до VR_Init) —
 	   Cvar_Get вернёт тот же cvar, флаги и значение не тронет. */
 	vl_gl_stereo = Cvar_Get( "gl_stereo", "0", 0 );
@@ -291,24 +509,38 @@ void VR_LensFrame( void )
 
 	if ( vl.active && vl.held_axis != VRL_AXIS_NONE && now >= vl.next_repeat_ms )
 	{
-		VR_LensNudge( vl.held_axis, vl.held_sign * VR_LensStep( now - vl.held_since_ms ) );
+		VR_LensNudge( vl.held_axis, vl.held_sign, now - vl.held_since_ms );
 		vl.next_repeat_ms = now + VRL_REPEAT_MS;
 	}
 
-	/* В FBO-модуль — только изменение. Сплит только в VR-режиме: обычный
-	   gl_stereo 2 (half-SBS для телевизора) выводится как раньше. */
-	split = mode && vl_gl_stereo->value == 2.0f;
-	if ( !vl.layout_valid || split != vl.layout_split
-	  || vr_lens_sep_mm->value != vl.layout[0]
-	  || vr_lens_vofs_mm->value != vl.layout[1]
-	  || vr_lens_tilt_mm->value != vl.layout[2] )
+	/* В FBO-модуль — только изменение: там на каждый вызов перестраивается
+	   и заливается в VBO вся сетка дисторсии. Сплит только в VR-режиме:
+	   обычный gl_stereo 2 (half-SBS для телевизора) выводится как раньше. */
 	{
-		vl.layout_valid = true;
-		vl.layout_split = split;
-		vl.layout[0] = vr_lens_sep_mm->value;
-		vl.layout[1] = vr_lens_vofs_mm->value;
-		vl.layout[2] = vr_lens_tilt_mm->value;
-		RFBO_SetLensLayout( split, vl.layout[0], vl.layout[1], vl.layout[2] );
+		bool on = ( vr_lens_distort->value != 0.0f );
+		float k1 = on ? vr_lens_k1->value : 0.0f;
+		float k2 = on ? vr_lens_k2->value : 0.0f;
+
+		split = mode && vl_gl_stereo->value == 2.0f;
+		if ( !vl.layout_valid || split != vl.layout_split
+		  || vr_lens_sep_mm->value != vl.layout[0]
+		  || vr_lens_vofs_mm->value != vl.layout[1]
+		  || vr_lens_tilt_mm->value != vl.layout[2]
+		  || vr_lens_dist_mm->value != vl.layout[3]
+		  || k1 != vl.layout[4]
+		  || k2 != vl.layout[5] )
+		{
+			vl.layout_valid = true;
+			vl.layout_split = split;
+			vl.layout[0] = vr_lens_sep_mm->value;
+			vl.layout[1] = vr_lens_vofs_mm->value;
+			vl.layout[2] = vr_lens_tilt_mm->value;
+			vl.layout[3] = vr_lens_dist_mm->value;
+			vl.layout[4] = k1;
+			vl.layout[5] = k2;
+			RFBO_SetLensLayout( split, vl.layout[0], vl.layout[1], vl.layout[2],
+					vl.layout[3], k1, k2 );
+		}
 	}
 }
 
@@ -316,6 +548,7 @@ bool VR_LensKeyEvent( int key, bool down )
 {
 	vrl_axis_t axis = VRL_AXIS_NONE;
 	float sign = 0.0f;
+	bool optics = ( vl.page == VRL_PAGE_OPTICS );
 
 	if ( !vl.inited )
 		return false;
@@ -346,36 +579,46 @@ bool VR_LensKeyEvent( int key, bool down )
 
 	/* На Авроре в key_menu A/B/START приходят уже как ENTER/ESCAPE, в игре —
 	   START как ESCAPE (IN_AuroraRemapGamepadKey), поэтому ловим обе формы.
-	   Клавиатура — для отладки на хосте. */
+	   Клавиатура — для отладки на хосте.
+
+	   Раскладка одна на обе страницы, меняется только смысл осей: D-pad
+	   влево-вправо — главная величина страницы (расстояние между картинками
+	   либо k1), вверх-вниз — вторая (высота либо k2), бамперы — третья
+	   (перекос либо расстояние до линзы). */
 	if ( key == K_GAMEPAD_LEFT || key == K_LEFTARROW )
 	{
-		axis = VRL_AXIS_SEP;
+		axis = optics ? VRL_AXIS_K1 : VRL_AXIS_SEP;
 		sign = -1.0f;
 	}
 	else if ( key == K_GAMEPAD_RIGHT || key == K_RIGHTARROW )
 	{
-		axis = VRL_AXIS_SEP;
+		axis = optics ? VRL_AXIS_K1 : VRL_AXIS_SEP;
 		sign = 1.0f;
 	}
 	else if ( key == K_GAMEPAD_UP || key == K_UPARROW )
 	{
-		axis = VRL_AXIS_VOFS;
+		axis = optics ? VRL_AXIS_K2 : VRL_AXIS_VOFS;
 		sign = 1.0f;
 	}
 	else if ( key == K_GAMEPAD_DOWN || key == K_DOWNARROW )
 	{
-		axis = VRL_AXIS_VOFS;
+		axis = optics ? VRL_AXIS_K2 : VRL_AXIS_VOFS;
 		sign = -1.0f;
 	}
 	else if ( key == K_GAMEPAD_R || key == K_PGUP )
 	{
-		axis = VRL_AXIS_TILT;
+		axis = optics ? VRL_AXIS_DIST : VRL_AXIS_TILT;
 		sign = 1.0f;
 	}
 	else if ( key == K_GAMEPAD_L || key == K_PGDN )
 	{
-		axis = VRL_AXIS_TILT;
+		axis = optics ? VRL_AXIS_DIST : VRL_AXIS_TILT;
 		sign = -1.0f;
+	}
+	else if ( key == K_GAMEPAD_Y || key == K_TAB )
+	{
+		vl.page = ( vl.page == VRL_PAGE_POSITION ) ? VRL_PAGE_OPTICS : VRL_PAGE_POSITION;
+		vl.held_axis = VRL_AXIS_NONE; /* ось под зажатой кнопкой сменила смысл */
 	}
 	else if ( key == K_GAMEPAD_A || key == K_ENTER )
 	{
@@ -394,7 +637,7 @@ bool VR_LensKeyEvent( int key, bool down )
 	{
 		int now = Sys_Milliseconds();
 
-		VR_LensNudge( axis, sign * VR_LensStep( 0 ) );
+		VR_LensNudge( axis, sign, 0 );
 		vl.held_key = key;
 		vl.held_axis = axis;
 		vl.held_sign = sign;
@@ -434,6 +677,29 @@ static void VR_LensText( int cx, int y, char *s, float scale )
 	DrawStringScaled( cx - (int)( strlen( s ) * 8 * scale * 0.5f ), y, s, scale );
 }
 
+/* Окружность точками: Draw_* умеет только прямоугольники, а круг на
+   странице оптики нужен именно круглым — по нему видно, что коррекция
+   радиально-симметрична и центр не уехал. kx сжимает X, как и везде. */
+static void VR_LensRing( int cx, int cy, float r, float t, float kx,
+		float red, float green, float blue, float alpha )
+{
+	const int steps = 48;
+	int i, sx = (int)( t * kx ), sy = (int)t;
+
+	if ( sx < 1 )
+		sx = 1;
+	if ( sy < 1 )
+		sy = 1;
+	for ( i = 0; i < steps; i++ )
+	{
+		float a = (float)i * ( 2.0f * 3.14159265f / (float)steps );
+		int px = cx + (int)( cosf( a ) * r * kx );
+		int py = cy + (int)( sinf( a ) * r );
+
+		Draw_FillAlpha( px - sx / 2, py - sy / 2, sx, sy, red, green, blue, alpha );
+	}
+}
+
 void VR_LensDraw( void )
 {
 	int W, H, cx, cy, i, lh, t2;
@@ -462,25 +728,49 @@ void VR_LensDraw( void )
 
 	Draw_FadeScreen();
 
-	/* Сетка — видно перекос по вертикали и то, где кончается поле линзы. */
-	for ( i = -6; i <= 6; i++ )
-	{
-		int gx = cx + (int)( i * 10.0f * u * kx );
-		int gy = cy + (int)( i * 10.0f * u );
+	/* Мишень рисуется в КАДР, то есть до дисторсии, и искажается сеткой
+	   вместе со сценой. Это и нужно: через линзу её линии обязаны выглядеть
+	   прямыми — по ним и подбирается k1. Рисуй мы её после дисторсии,
+	   калибровать было бы нечего. */
 
-		if ( i == 0 )
-			continue;
-		if ( gy > 0 && gy < H )
-			Draw_FillAlpha( 0, gy - t2 / 2, W, t2, 0.6f, 0.6f, 0.6f, 0.35f );
-		if ( gx > 0 && gx < W )
-			Draw_FillAlpha( gx - (int)( t2 * kx ) / 2, 0, (int)( t2 * kx ), H, 0.6f, 0.6f, 0.6f, 0.35f );
+	/* Сетка — видно перекос по вертикали и то, где кончается поле линзы.
+	   На странице оптики она гуще и покрывает всю область глаза: кривизну
+	   видно по краям, а там линий и должно быть много. */
+	{
+		int span = ( vl.page == VRL_PAGE_OPTICS ) ? 14 : 6;
+		float alpha = ( vl.page == VRL_PAGE_OPTICS ) ? 0.5f : 0.35f;
+
+		for ( i = -span; i <= span; i++ )
+		{
+			int gx = cx + (int)( i * 10.0f * u * kx );
+			int gy = cy + (int)( i * 10.0f * u );
+
+			if ( i == 0 )
+				continue;
+			if ( gy > 0 && gy < H )
+				Draw_FillAlpha( 0, gy - t2 / 2, W, t2, 0.6f, 0.6f, 0.6f, alpha );
+			if ( gx > 0 && gx < W )
+				Draw_FillAlpha( gx - (int)( t2 * kx ) / 2, 0, (int)( t2 * kx ), H, 0.6f, 0.6f, 0.6f, alpha );
+		}
 	}
 
-	/* Кольца-квадраты и крест. Сведённые, они должны совпасть целиком: по
-	   кольцам двоение заметнее, чем по одному кресту. */
-	VR_LensBox( cx, cy, 8.0f * u, t, kx, 1.0f, 1.0f, 1.0f, 0.9f );
-	VR_LensBox( cx, cy, 18.0f * u, t, kx, 1.0f, 0.85f, 0.2f, 0.9f );
-	VR_LensBox( cx, cy, 30.0f * u, t, kx, 0.3f, 0.7f, 1.0f, 0.9f );
+	if ( vl.page == VRL_PAGE_OPTICS )
+	{
+		/* Концентрические окружности по всей области глаза: при верном k1
+		   они круглые и равномерные, при заниженном — раздуты к краю
+		   (остаточная подушка), при завышенном — сжаты (перекоррекция). */
+		VR_LensRing( cx, cy, 12.0f * u, t, kx, 1.0f, 1.0f, 1.0f, 0.9f );
+		VR_LensRing( cx, cy, 24.0f * u, t, kx, 1.0f, 0.85f, 0.2f, 0.9f );
+		VR_LensRing( cx, cy, 36.0f * u, t, kx, 0.3f, 0.7f, 1.0f, 0.9f );
+	}
+	else
+	{
+		/* Кольца-квадраты и крест. Сведённые, они должны совпасть целиком: по
+		   кольцам двоение заметнее, чем по одному кресту. */
+		VR_LensBox( cx, cy, 8.0f * u, t, kx, 1.0f, 1.0f, 1.0f, 0.9f );
+		VR_LensBox( cx, cy, 18.0f * u, t, kx, 1.0f, 0.85f, 0.2f, 0.9f );
+		VR_LensBox( cx, cy, 30.0f * u, t, kx, 0.3f, 0.7f, 1.0f, 0.9f );
+	}
 
 	Draw_FillAlpha( cx - (int)( 30.0f * u * kx ), cy - (int)( t * 0.5f ),
 			(int)( 60.0f * u * kx ), (int)t, 0.2f, 1.0f, 0.2f, 1.0f );
@@ -494,15 +784,37 @@ void VR_LensDraw( void )
 
 	dpi = RFBO_GetLensScreenMm( &wmm, &hmm );
 
-	VR_LensText( cx, cy - (int)( 32.0f * u ) - 2 * lh, "VR LENS CALIBRATION", scale );
-	VR_LensText( cx, cy - (int)( 32.0f * u ) - lh, "merge both targets into one sharp cross", scale );
+	if ( vl.page == VRL_PAGE_OPTICS )
+	{
+		float fov = 0.0f;
+		bool has_fov = RFBO_GetLensFovY( &fov );
 
-	VR_LensText( cx, cy + (int)( 32.0f * u ), "DPAD L/R distance  U/D height  LB/RB tilt", scale );
-	VR_LensText( cx, cy + (int)( 32.0f * u ) + lh, "A save   B cancel   X reset", scale );
-	VR_LensText( cx, cy + (int)( 32.0f * u ) + 2 * lh,
-			va( "dist %.1fmm  height %+.1f  tilt %+.1f%s",
-				vr_lens_sep_mm->value, vr_lens_vofs_mm->value, vr_lens_tilt_mm->value,
-				dpi ? "" : "  (no dpi)" ), scale );
+		/* 40u, а не 50u: 50u — это ровно половина высоты кадра, там строки
+		   упираются в край экрана и обрезаются. Кольца выше кончаются на
+		   36u, так что подписи их не перекрывают. */
+		VR_LensText( cx, cy - (int)( 40.0f * u ) - 2 * lh, "VR LENS CALIBRATION  2/2 OPTICS", scale );
+		VR_LensText( cx, cy - (int)( 40.0f * u ) - lh, "tune k1 until grid lines look straight", scale );
+
+		VR_LensText( cx, cy + (int)( 40.0f * u ), "DPAD L/R k1   U/D k2   LB/RB lens dist", scale );
+		VR_LensText( cx, cy + (int)( 40.0f * u ) + lh, "Y position page   A save   B cancel   X reset", scale );
+		VR_LensText( cx, cy + (int)( 40.0f * u ) + 2 * lh,
+				va( "k1 %.3f  k2 %.3f  lens %.1fmm  fov %.0f%s",
+					vr_lens_k1->value, vr_lens_k2->value, vr_lens_dist_mm->value,
+					has_fov ? fov : 0.0f,
+					( vr_lens_distort->value != 0.0f ) ? "" : "  (distortion off)" ), scale );
+	}
+	else
+	{
+		VR_LensText( cx, cy - (int)( 32.0f * u ) - 2 * lh, "VR LENS CALIBRATION  1/2 POSITION", scale );
+		VR_LensText( cx, cy - (int)( 32.0f * u ) - lh, "merge both targets into one sharp cross", scale );
+
+		VR_LensText( cx, cy + (int)( 32.0f * u ), "DPAD L/R distance  U/D height  LB/RB tilt", scale );
+		VR_LensText( cx, cy + (int)( 32.0f * u ) + lh, "Y optics page   A save   B cancel   X reset", scale );
+		VR_LensText( cx, cy + (int)( 32.0f * u ) + 2 * lh,
+				va( "dist %.1fmm  height %+.1f  tilt %+.1f%s",
+					vr_lens_sep_mm->value, vr_lens_vofs_mm->value, vr_lens_tilt_mm->value,
+					dpi ? "" : "  (no dpi)" ), scale );
+	}
 }
 
 #else /* !AURORA_VR — сборка без VR: заглушки */

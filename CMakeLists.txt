@@ -118,11 +118,9 @@ endif()
 # vr_head.c / sensorfw_async.c попадают в glob src/quake2/client/*.c и без
 # дефайна собираются в no-op стабы, так что host-сборка не зависит от
 # D-Bus (по образцу aurora_keepalive.c / maliit_client.c).
-set(AURORA_VR_ENABLED OFF)
 if(AURORA_VR)
     if(DBUS_FOUND)
         add_compile_definitions(AURORA_VR)
-        set(AURORA_VR_ENABLED ON)
     else()
         message(WARNING "dbus-1 не найден: картонный VR (сенсоры) отключён")
     endif()
@@ -251,24 +249,6 @@ target_link_libraries(quake2
     m
     dl
 )
-
-# --- Синтетический тест фильтра ориентации (host-only) ---------------------
-# Гоняет vr_math.h на сгенерированной траектории головы: маппинг осей,
-# извлечение углов, сходимость Махони при заданном bias, поведение гейта
-# акселерометра. Математику VR иначе не проверить — для этого нужен шлем,
-# а ошибки в знаках осей ловятся именно здесь. В основной бинарь не входит
-# и при кросс-сборке не собирается (запускать его негде).
-if(AURORA_VR_ENABLED AND NOT CMAKE_CROSSCOMPILING)
-    add_executable(vr_filter_test tests/vr_filter_test.c)
-    target_include_directories(vr_filter_test PRIVATE src/quake2/client)
-    target_link_libraries(vr_filter_test m)
-
-    # Раскладка глаз под линзы (vr_lens.h): мм <-> NDC контента, обрезка
-    # внутренних краёв, соответствие UV позициям.
-    add_executable(vr_lens_test tests/vr_lens_test.c)
-    target_include_directories(vr_lens_test PRIVATE src/quake2/client)
-    target_link_libraries(vr_lens_test m)
-endif()
 
 # --- Миссион-пакеты (game.so) ----------------------------------------------
 

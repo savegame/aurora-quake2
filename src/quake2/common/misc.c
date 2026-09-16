@@ -31,6 +31,9 @@
 
 #if defined(AURORA_OS)
 #include "client/aurora_launcher.h"
+#if defined(AURORA_VR)
+#include "client/vr_head.h"
+#endif
 #endif
 
 /* Заголовок платформенно-нейтральный: на host-сборке внутри заглушки. */
@@ -285,6 +288,10 @@ static void Qcommon_Init(int argc, char **argv)
 		if (vr != NULL && (vr[0] == '0' || vr[0] == '1') && vr[1] == '\0')
 			Cbuf_AddText(va("set vr_mode %s\n", vr));
 	}
+
+	/* Калибровка линз общая для всех модов и живёт в launcher.conf (см.
+	   vr_lens.c): user.cfg выше — файл текущего мода. */
+	VR_LensLoadShared();
 #endif
 
 	Cbuf_AddEarlyCommands(true);
