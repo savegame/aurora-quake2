@@ -11,6 +11,3 @@ Exec=__ORGNAME__.__APPNAME__
 Permissions=Internet;Audio;UserDirs;Sensors
 OrganizationName=__ORGNAME__
 ApplicationName=__APPNAME__
-
-[X-Aurora-Application]
-Orientation=LandscapeInverted;Landscape

@@ -2,5 +2,7 @@ build
 RPMS/
 temp/
 port_config.json
-port_status.md
+*.md
+!README.*
 gameport
+research/
