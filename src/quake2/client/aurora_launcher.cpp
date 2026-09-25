@@ -405,6 +405,10 @@ struct LauncherSettings
 #if defined(AURORA_VR)
 	/* Картонный VR: cvar vr_mode (стерео + голова управляет камерой). */
 	bool        vr_mode = false;
+	/* Способ прицеливания в VR: cvar vr_aim_mode. 0 — только гироскоп,
+	   1 — гироскоп плюс наклон правым стиком. Число, а не галочка:
+	   способы ещё будут добавляться. */
+	int         vr_aim_mode = 0;
 #endif
 	/* Ключи, о которых лаунчер не знает (например калибровку линз vr_lens_*,
 	   которую пишет движок из любого мода). Переносятся при сохранении как
@@ -448,6 +452,7 @@ void LoadSettings()
 		else if( k == "sv_itemban" )     g_settings.sv_itemban = atoi( v.c_str());
 #if defined(AURORA_VR)
 		else if( k == "vr_mode" )        g_settings.vr_mode = atoi( v.c_str()) != 0;
+		else if( k == "vr_aim_mode" )    g_settings.vr_aim_mode = atoi( v.c_str());
 #endif
 		else                             g_settings.extra.push_back( k + "=" + v );
 	}
@@ -461,6 +466,12 @@ void LoadSettings()
 	if( g_settings.sv_timelimit < 0 )    g_settings.sv_timelimit = 0;
 	if( g_settings.sv_timelimit > 999 )  g_settings.sv_timelimit = 999;
 	g_settings.sv_itemban &= 15;
+#if defined(AURORA_VR)
+	/* Чужое значение (конфиг от новой сборки) — назад к «только гироскоп»:
+	   лаунчер не должен показывать пункт, которого у него нет. */
+	if( g_settings.vr_aim_mode < 0 || g_settings.vr_aim_mode > 1 )
+		g_settings.vr_aim_mode = 0;
+#endif
 }
 
 void SaveSettings()
@@ -480,6 +491,7 @@ void SaveSettings()
 	fprintf( f, "sv_itemban=%d\n",     g_settings.sv_itemban );
 #if defined(AURORA_VR)
 	fprintf( f, "vr_mode=%d\n",        g_settings.vr_mode ? 1 : 0 );
+	fprintf( f, "vr_aim_mode=%d\n",    g_settings.vr_aim_mode );
 #endif
 	for( const std::string &e : g_settings.extra )
 		fprintf( f, "%s\n", e.c_str());
@@ -945,6 +957,38 @@ void DrawTab_Settings()
 		"Стереокартинка для картонного шлема, голова поворачивает камеру. "
 		"Управление — геймпадом, кнопка Y — рецентр. "
 		"В игре переключается командой vr_mode 0/1." );
+
+	/* Способ прицеливания имеет смысл только в шлеме: без VR голова
+	   камерой не управляет, и выбирать не из чего. В движок уходит
+	   через env AURORA_VR_AIM -> cvar vr_aim_mode (misc.c). */
+	ImGui::Dummy( ImVec2( 0, fs * 0.5f ));
+	ImGui::BeginDisabled( !g_settings.vr_mode );
+	{
+		static const char *kAimNames[] = { "Только гироскоп", "Гироскоп + правый стик" };
+		int  aim = g_settings.vr_aim_mode;
+		if( aim < 0 || aim > 1 ) aim = 0;
+
+		ImGui::PushItemWidth( -fs * 4.f );
+		if( ImGui::BeginCombo( "Прицеливание", kAimNames[aim] ))
+		{
+			for( int i = 0; i < 2; i++ )
+			{
+				const bool sel = ( i == aim );
+				if( ImGui::Selectable( kAimNames[i], sel ))
+					g_settings.vr_aim_mode = i;
+				if( sel )
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+		ImGui::PopItemWidth();
+	}
+	ImGui::TextWrapped(
+		"«Только гироскоп»: правый стик поворачивает по горизонтали, "
+		"вверх-вниз смотрят головой. «Гироскоп + правый стик»: стик "
+		"наклоняет камеру и вверх-вниз, голова доцеливает точно. "
+		"В игре — команда vr_aim_mode 0/1." );
+	ImGui::EndDisabled();
 #endif
 }
 
@@ -1558,6 +1602,7 @@ extern "C" int Launcher_Run( void )
 		/* И «0» тоже передаём: лаунчер — источник истины, снятая галочка
 		   обязана выключить VR, сохранённый в user.cfg. */
 		setenv( "AURORA_VR_MODE", g_settings.vr_mode ? "1" : "0", 1 );
+		setenv( "AURORA_VR_AIM", g_settings.vr_aim_mode ? "1" : "0", 1 );
 #endif
 
 		g_settings.path = g_picker.selected;

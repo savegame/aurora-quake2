@@ -964,6 +964,17 @@ void IN_Move(usercmd_t *cmd)
         float pitchDeltaStick = speed * cl_speed_pitch->value * joyYFloat;
         if (stick_pitch_inverted->value)
             pitchDeltaStick = -pitchDeltaStick;
+#if defined(AURORA_VR)
+        /* vr_aim_mode 1: в шлеме pitch каждый кадр выставляет голова
+           абсолютно (иначе уехал бы горизонт), поэтому прибавка к
+           cl.viewangles тут же и потерялась бы. Дельту копит VR-модуль
+           отдельным смещением и сам прибавляет её к наклону головы.
+           Чувствительность и инверсия — штатные cl_speed_pitch /
+           stick_pitch_inverted, посчитанные строкой выше. */
+        if (VR_AimPitchTakesStick())
+            VR_AimPitchAdd(pitchDeltaMouse + pitchDeltaStick);
+        else
+#endif
         cl.viewangles[PITCH] += pitchDeltaMouse + pitchDeltaStick;
     }
     else

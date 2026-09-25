@@ -287,6 +287,12 @@ static void Qcommon_Init(int argc, char **argv)
 		char *vr = getenv("AURORA_VR_MODE");
 		if (vr != NULL && (vr[0] == '0' || vr[0] == '1') && vr[1] == '\0')
 			Cbuf_AddText(va("set vr_mode %s\n", vr));
+
+		/* Способ прицеливания в VR (тот же выбор в лаунчере, рядом с
+		   галочкой). Порядок и проверка значения — как у vr_mode. */
+		vr = getenv("AURORA_VR_AIM");
+		if (vr != NULL && (vr[0] == '0' || vr[0] == '1') && vr[1] == '\0')
+			Cbuf_AddText(va("set vr_aim_mode %s\n", vr));
 	}
 
 	/* Калибровка линз общая для всех модов и живёт в launcher.conf (см.

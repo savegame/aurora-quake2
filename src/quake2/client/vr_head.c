@@ -59,6 +59,9 @@ static cvar_t *vr_debug;      /* 0 выкл, 1 оверлей, 2 + сырые п
 static cvar_t *vr_log;        /* строка в консоль раз в секунду */
 static cvar_t *vr_interval_ms;
 
+static cvar_t *vr_aim_mode;   /* способ прицеливания, см. vr_aim_mode_t */
+static cvar_t *vr_recenter_ease_ms; /* плавность возврата pitch при рецентре */
+
 static cvar_t *vr_gyro_scale; /* °/с на единицу сырого значения гироскопа */
 static cvar_t *vr_gyro_bias_x;
 static cvar_t *vr_gyro_bias_y;
@@ -89,6 +92,19 @@ typedef enum
    при переходе взгляда через зенит/надир, а не движение. */
 #define VR_YAW_JUMP_DEG 90.0f
 
+/* Тот же предел, что у CL_ClampPitch (cl_input.c) и PM_ClampAngles
+   (pmove.c): выше зенита и ниже надира игра не смотрит в принципе. */
+#define VR_PITCH_LIMIT 89.0f
+
+/* Значения vr_aim_mode. Cvar числовой намеренно: следующие способы
+   (прицел отдельно от камеры и т.п.) добавятся сюда новым значением, а
+   неизвестное значение работает как VR_AIM_GYRO — то есть как раньше. */
+typedef enum
+{
+	VR_AIM_GYRO = 0,      /* поворот тела стиком по yaw, наклон — только головой */
+	VR_AIM_GYRO_STICK = 1 /* стик поворачивает и по pitch, голова доцеливает */
+} vr_aim_mode_t;
+
 typedef struct
 {
 	bool              inited;    /* VR_Init прошёл (в dedicated его нет) */
@@ -115,6 +131,13 @@ typedef struct
 	bool              cam_valid;     /* cam_prev_yaw — база для дельты */
 	float             cam_prev_yaw;
 	bool              cam_driving;   /* на прошлом кадре голова писала углы */
+
+	/* Прицеливание */
+	int               aim_mode;      /* vr_aim_mode, снятый на кадре */
+	float             aim_pitch;     /* смещение pitch, накопленное стиком */
+	bool              ease_active;   /* идёт плавный возврат смещения к нулю */
+	float             ease_from;     /* смещение в момент рецентра */
+	int               ease_start_ms;
 
 	float             raw_gyro[3];  /* последние сырые значения, для отладки */
 	float             raw_accel[3];
@@ -285,6 +308,15 @@ static float VR_NormalizeAngle( float a )
 	return a;
 }
 
+/* Значение vr_aim_mode, приведённое к известным. Незнакомое число (чужой
+   конфиг, будущий режим в старой сборке) работает как 0: лучше привычное
+   управление, чем непредсказуемое. */
+static int VR_AimModeValue( void )
+{
+	return ( (int)vr_aim_mode->value == VR_AIM_GYRO_STICK )
+			? VR_AIM_GYRO_STICK : VR_AIM_GYRO;
+}
+
 /* Наклон по акселерометру, в осях камеры. Используется калибровкой и
    отладкой; вернёт false, пока акселерометр не дал ни одного семпла. */
 static bool VR_AccelAngles( float *pitch, float *roll )
@@ -323,6 +355,13 @@ static char *VR_SensorLine( sensorfw_async_t *c, char *label )
  * головы не зависит. Нулевая точка нужна vr_status/vr_debug и будущему
  * раздельному yaw тела (§6.4). База дельты сбрасывается, чтобы смена
  * yaw_offset не прошла в камеру скачком.
+ *
+ * Накопленное стиком смещение pitch (vr_aim_mode 1) здесь сбрасывается —
+ * в отличие от yaw, это видимый поворот камеры. Так и задумано: рецентр
+ * зовут именно тогда, когда «прямо перед собой» в шлеме перестало
+ * совпадать с «прямо» в игре, и по pitch расхождение даёт как раз это
+ * смещение. После рецентра взгляд в игре снова равен наклону головы, то
+ * есть горизонт на месте — а набрать смещение заново стиком стоит секунды.
  */
 static void VR_Recenter_f( void )
 {
@@ -330,6 +369,22 @@ static void VR_Recenter_f( void )
 
 	VR_CameraAngles( a );
 	vr.yaw_offset = a[1];
+	/* Набранный стиком наклон возвращаем к наклону головы не скачком:
+	   в шлеме мгновенный поворот камеры на десятки градусов — это рывок
+	   всей картины перед глазами, от которого укачивает. Разгон и
+	   торможение (smoothstep) читаются как «камера сама доводится».
+	   vr_recenter_ease_ms 0 возвращает прежнее мгновенное поведение. */
+	if ( vr.aim_pitch != 0.0f && vr_recenter_ease_ms->value > 0.0f )
+	{
+		vr.ease_from = vr.aim_pitch;
+		vr.ease_start_ms = Sys_Milliseconds();
+		vr.ease_active = true;
+	}
+	else
+	{
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
+	}
 	vr.cam_valid = false;
 	Com_Printf( "vr: recentered, yaw_offset = %.1f\n", vr.yaw_offset );
 }
@@ -366,6 +421,10 @@ static void VR_Status_f( void )
 	Com_Printf( "head angles: pitch %.1f yaw %.1f roll %.1f (yaw_offset %.1f)\n",
 			a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2], vr.yaw_offset );
 	Com_Printf( "camera: %s\n", vr.cam_driving ? "driven by head" : "not driven" );
+	Com_Printf( "vr_aim_mode %d (%s), stick pitch offset %+.1f\n",
+			(int)vr_aim_mode->value,
+			( vr.aim_mode == VR_AIM_GYRO_STICK ) ? "gyro + right stick" : "gyro only",
+			vr.aim_pitch );
 	if ( VR_AccelAngles( &ap, &ar ) )
 		Com_Printf( "from accel: pitch %.1f roll %.1f, |a| %.0f, g_ref %.0f\n",
 				ap, ar, vr.f.accel_norm, vr.f.gravity_ref );
@@ -598,6 +657,8 @@ static void VR_Calibrate_f( void )
 		vr.seeded = false;
 		vr.cam_valid = false;
 		vr.yaw_offset = 0.0f;
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
 		vr.gyro_ts = 0;
 		Com_Printf( "vr_calibrate: filter and measurement history reset\n" );
 	}
@@ -677,6 +738,10 @@ static void VR_ApplyMode( bool on )
 		vr.lock_transform = RFBO_GetRotation();
 		vr.lock_valid = true;
 		vr.cam_valid = false;
+		/* Смещение pitch — часть сеанса в шлеме: новый сеанс начинается
+		   с «взгляд в игре = наклон головы». */
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
 		Com_Printf( "vr: mode on (gl_stereo 2, screen rotation locked at %d)\n", vr.lock_transform );
 	}
 	else
@@ -771,6 +836,14 @@ void VR_Init( void )
 	   Значение best-effort, демон вправе прижать к своей сетке. */
 	vr_interval_ms = Cvar_Get( "vr_interval_ms", "5", CVAR_ARCHIVE );
 
+	/* Способ прицеливания: 0 — только гироскоп (как было), 1 — гироскоп
+	   плюс наклон правым стиком. Архивный, задаётся и из лаунчера
+	   (env AURORA_VR_AIM, misc.c — там же, где vr_mode), и через
+	   +set vr_aim_mode, и меняется прямо в игре. */
+	vr_aim_mode = Cvar_Get( "vr_aim_mode", "0", CVAR_ARCHIVE );
+	/* Длительность доводки pitch после vr_recenter, мс. 0 — мгновенно. */
+	vr_recenter_ease_ms = Cvar_Get( "vr_recenter_ease_ms", "250", CVAR_ARCHIVE );
+
 	/* Сырые единицы гироскопа sensorfwd — милли-градусы в секунду, это не
 	   гипотеза, а цепочка из исходников: hybris-адаптер sensorfw пишет
 	   rad/s из Android HAL как x * RADIANS_TO_DEGREES * 1000, а QtSensors
@@ -799,6 +872,7 @@ void VR_Init( void )
 	VR_LensInit();
 
 	vr.hz_last_ms = Sys_Milliseconds();
+	vr.aim_mode = VR_AimModeValue();
 	vr.inited = true;
 
 	if ( vr_enabled->value )
@@ -834,10 +908,21 @@ void VR_Shutdown( void )
 void VR_Frame( void )
 {
 	bool gate, mode;
-	int now, interval;
+	int now, interval, aim;
 
 	if ( !vr.inited )
 		return;
+
+	/* Смена способа прицеливания на лету. Накопленное стиком смещение
+	   pitch относится к прежнему режиму: в «только гироскопе» оно не
+	   используется, и при возврате всплыло бы скачком камеры. */
+	aim = VR_AimModeValue();
+	if ( aim != vr.aim_mode )
+	{
+		vr.aim_mode = aim;
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
+	}
 
 	/* Переключение режима из консоли: сравнение со значением, а не флаг
 	   modified, — флаг могли сбросить посторонние, а значение надёжно. */
@@ -969,26 +1054,134 @@ static float VR_ServerDelta( int axis )
  * Вычитание delta_angles нужно, чтобы видимый pitch (cmd + delta) равнялся
  * pitch головы при любом значении, которое выставил сервер.
  *
+ * При vr_aim_mode 1 к абсолютному pitch головы прибавляется смещение,
+ * накопленное правым стиком (VR_AimPitch): голова по-прежнему задаёт
+ * горизонт и точное доцеливание, а стик даёт грубый наклон, не задирая
+ * шею. Дельтой pitch не делаем и здесь — по той же причине, по которой
+ * абсолютен он сам.
+ *
  * ROLL проходит до рендера без отдельного канала: ANGLE2SHORT по всем
  * трём углам (CL_FinishMove) -> PM_ClampAngles (цикл по трём, зажим только
  * PITCH) -> cl.predicted_angles -> cl.refdef.viewangles (CL_CalcViewValues)
  * -> матрица вида. Без предсказания (cl_predict 0) путь тот же:
  * CL_PredictMovement копирует viewangles + delta_angles по всем трём.
  */
+/*
+ * Управляет ли голова камерой прямо сейчас. В меню, консоли, до входа в
+ * игру, без данных сенсоров и во время калибровки линз (мишень обязана
+ * стоять в центре) — нет.
+ *
+ * Условие вынесено отдельно, потому что его же спрашивает ввод: пока
+ * голова камерой не управляет, наклон стиком обязан идти в cl.viewangles
+ * обычным путём, иначе в тех же меню и без сенсоров смотреть вверх-вниз
+ * стало бы нечем.
+ */
+static bool VR_HeadDrives( void )
+{
+	return vr.inited && vr.mode_applied && vr.seeded && VR_Active()
+	    && cls.state == ca_active && cls.key_dest == key_game
+	    && !VR_LensCalibrating();
+}
+
+/*
+ * Смещение pitch от стика поверх абсолютного pitch головы (vr_aim_mode 1).
+ *
+ * Сумма зажимается тем же ±89, что CL_ClampPitch и PM_ClampAngles, —
+ * дальше игра всё равно не смотрит. На упоре смещение подтягивается к
+ * границе, но ТОЛЬКО когда это уменьшает его модуль. Два разных случая,
+ * и одно правило закрывает оба:
+ *
+ *  - игрок держит стик в упоре: без подтягивания смещение росло бы
+ *    неограниченно, и обратный ход стика первые секунды не давал бы
+ *    никакого движения картинки («залипание»). С ним отклик мгновенный;
+ *  - игрок сам задрал голову за 89° при нулевом смещении: тут
+ *    подтягивание, наоборот, СОЗДАЛО бы смещение из ниоткуда, и вернув
+ *    голову к горизонту игрок увидел бы уехавший взгляд. В этом случае
+ *    смещение не трогаем — хватает зажима выходного угла, ровно как в
+ *    режиме «только гироскоп».
+ *
+ * Смещение при этом остаётся «добавкой к голове»: вернув голову в
+ * исходное положение, игрок получает ровно тот угол, который набрал
+ * стиком, а не что-то новое.
+ */
+/* Шаг плавного возврата смещения к нулю после рецентра. */
+static void VR_AimEaseStep( void )
+{
+	float dur, t;
+
+	if ( !vr.ease_active )
+		return;
+
+	dur = vr_recenter_ease_ms->value;
+	if ( dur <= 0.0f )
+	{
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
+		return;
+	}
+
+	t = (float)( Sys_Milliseconds() - vr.ease_start_ms ) / dur;
+	if ( t >= 1.0f )
+	{
+		vr.aim_pitch = 0.0f;
+		vr.ease_active = false;
+		return;
+	}
+	if ( t < 0.0f ) /* Sys_Milliseconds мог перещёлкнуть — не застреваем */
+		t = 0.0f;
+
+	/* smoothstep: плавный старт и плавная остановка. */
+	vr.aim_pitch = vr.ease_from * ( 1.0f - t * t * ( 3.0f - 2.0f * t ) );
+}
+
+static float VR_AimPitch( float head_pitch )
+{
+	float sum;
+	float want;
+
+	VR_AimEaseStep();
+	sum = head_pitch + vr.aim_pitch;
+
+	if ( sum > VR_PITCH_LIMIT )
+		sum = VR_PITCH_LIMIT;
+	else if ( sum < -VR_PITCH_LIMIT )
+		sum = -VR_PITCH_LIMIT;
+	else
+		return sum;
+
+	want = sum - head_pitch;
+	if ( fabs( want ) < fabs( vr.aim_pitch ) )
+		vr.aim_pitch = want;
+
+	return sum;
+}
+
+bool VR_AimPitchTakesStick( void )
+{
+	return vr.aim_mode == VR_AIM_GYRO_STICK && VR_HeadDrives();
+}
+
+void VR_AimPitchAdd( float delta )
+{
+	/* Игрок тронул стик — доводка больше не нужна, управление у него. */
+	vr.ease_active = false;
+
+	/* Зажим — в VR_AimPitch, на кадре применения: он зависит от текущего
+	   наклона головы, которого здесь ещё нет. */
+	vr.aim_pitch += delta;
+}
+
 void VR_ApplyHeadToView( void )
 {
-	float head[3], d;
+	float head[3], d, pitch;
 	bool drive;
 
 	if ( !vr.inited )
 		return;
 
-	/* В меню, консоли, до входа в игру и без данных голова камерой не
-	   управляет: база дельты сбрасывается, чтобы повороты головы за это
-	   время не прилетели в камеру разом при возврате. */
-	drive = vr.mode_applied && vr.seeded && VR_Active()
-	     && cls.state == ca_active && cls.key_dest == key_game
-	     && !VR_LensCalibrating(); /* мишень обязана стоять в центре линз */
+	/* База дельты yaw сбрасывается, чтобы повороты головы за время без
+	   управления не прилетели в камеру разом при возврате. */
+	drive = VR_HeadDrives();
 
 	if ( !drive )
 	{
@@ -1015,7 +1208,11 @@ void VR_ApplyHeadToView( void )
 	vr.cam_prev_yaw = head[YAW];
 	vr.cam_valid = true;
 
-	cl.viewangles[PITCH] = head[PITCH] - VR_ServerDelta( PITCH );
+	pitch = head[PITCH];
+	if ( vr.aim_mode == VR_AIM_GYRO_STICK )
+		pitch = VR_AimPitch( pitch );
+
+	cl.viewangles[PITCH] = pitch - VR_ServerDelta( PITCH );
 	cl.viewangles[ROLL] = head[ROLL] - VR_ServerDelta( ROLL );
 	vr.cam_driving = true;
 }
@@ -1025,6 +1222,7 @@ void VR_DrawDebug( void )
 	float a[3], ap = 0.0f, ar = 0.0f;
 	float scale;
 	int y, step;
+	char aim[32];
 
 	if ( !vr.inited || vr_debug->value == 0.0f )
 		return;
@@ -1041,8 +1239,14 @@ void VR_DrawDebug( void )
 			VR_Active() ? "STREAMING" : "no data", (int)vr.mode_applied,
 			vr.cam_driving ? " cam" : "" ), scale );
 	y += step;
-	DrawStringScaled( step, y, va( "pitch %+6.1f yaw %+6.1f roll %+6.1f",
-			a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2] ), scale );
+	/* va() у движка — один статический буфер, вложенный вызов затёр бы
+	   внешний: смещение форматируем отдельно. */
+	aim[0] = '\0';
+	if ( vr.aim_mode == VR_AIM_GYRO_STICK )
+		Com_sprintf( aim, sizeof( aim ), "  aim %+.1f", vr.aim_pitch );
+
+	DrawStringScaled( step, y, va( "pitch %+6.1f yaw %+6.1f roll %+6.1f%s",
+			a[0], VR_NormalizeAngle( a[1] - vr.yaw_offset ), a[2], aim ), scale );
 	y += step;
 	DrawStringScaled( step, y, va( "gyro %3.0fHz  accel %3.0fHz  |w| %5.1f",
 			vr.gyro_hz, vr.accel_hz, vr.f.gyro_speed_dps ), scale );
@@ -1095,6 +1299,8 @@ bool VR_Active( void ) { return false; }
 bool VR_ModeEnabled( void ) { return false; }
 void VR_GetHeadAngles( float angles[3] ) { angles[0] = angles[1] = angles[2] = 0.0f; }
 void VR_ApplyHeadToView( void ) {}
+bool VR_AimPitchTakesStick( void ) { return false; }
+void VR_AimPitchAdd( float delta ) { (void)delta; }
 int VR_LockTransform( int transform ) { return transform; }
 void VR_DrawDebug( void ) {}
 
